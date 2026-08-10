@@ -85,31 +85,14 @@ static void LoadSettings()
 }
 
 // --- Combat aiming -----------------------------------------------------------
-// Reconstructs the ranged-combat state hierarchy from Shtivi's RDR2-DualSense
-// updateTriggers(): gun, bow, throwables and mounted weapons (Gatling / Maxim /
-// cannons). Returns true ONLY while the player actively aims a ready combat
-// weapon (or while reloading one) - never during NPC interactions or melee.
+// Simple and stable: gun/bow in hand + aiming input. Returns true only during
+// weapon combat aiming - never during NPC interactions or melee.
 bool IsPlayerCombatAiming(Ped playerPed)
 {
     Hash weaponHash = 0;
     WEAPON::GET_CURRENT_PED_WEAPON(playerPed, &weaponHash, true, 0, true);
-
-    Hash mountedWeapon = 0;
-    WEAPON::GET_CURRENT_PED_VEHICLE_WEAPON(playerPed, &mountedWeapon);
-
-    bool hasRangedWeapon =
-        WEAPON::IS_WEAPON_A_GUN(weaponHash) ||
-        WEAPON::IS_WEAPON_BOW(weaponHash) ||
-        WEAPON::_IS_WEAPON_THROWABLE(weaponHash) ||
-        mountedWeapon == -628784915 ||  // Gatling
-        mountedWeapon == -1193642378 || // Maxim
-        mountedWeapon == 1609145491 ||  // normal cannon
-        mountedWeapon == -1829236809;   // automatic cannon
-
-    bool isReloading = PAD::IS_CONTROL_PRESSED(0, 32) && PED::IS_PED_RELOADING(playerPed);
-    bool aimingInput = PAD::IS_CONTROL_PRESSED(0, 32) || isReloading;
-
-    return hasRangedWeapon && aimingInput;
+    bool hasRangedWeapon = WEAPON::IS_WEAPON_A_GUN(weaponHash) || WEAPON::IS_WEAPON_BOW(weaponHash);
+    return (PLAYER::IS_PLAYER_FREE_AIMING(PLAYER::PLAYER_ID()) || PAD::IS_CONTROL_PRESSED(0, 32)) && hasRangedWeapon;
 }
 
 // --- Gamepad discovery -------------------------------------------------------

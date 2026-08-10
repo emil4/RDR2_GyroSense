@@ -91,7 +91,11 @@ bool IsPlayerCombatAiming(Ped playerPed)
 {
     Hash weaponHash = 0;
     WEAPON::GET_CURRENT_PED_WEAPON(playerPed, &weaponHash, true, 0, true);
-    bool hasRangedWeapon = WEAPON::IS_WEAPON_A_GUN(weaponHash) || WEAPON::IS_WEAPON_BOW(weaponHash);
+    bool hasRangedWeapon = WEAPON::IS_WEAPON_A_GUN(weaponHash)
+                        || WEAPON::IS_WEAPON_BOW(weaponHash)
+                        || WEAPON::_IS_WEAPON_THROWABLE(weaponHash)
+                        || WEAPON::_IS_WEAPON_LASSO(weaponHash)
+                        || WEAPON::_IS_WEAPON_BINOCULARS(weaponHash);
     return (PLAYER::IS_PLAYER_FREE_AIMING(PLAYER::PLAYER_ID()) || PAD::IS_CONTROL_PRESSED(0, 32)) && hasRangedWeapon;
 }
 
@@ -188,11 +192,15 @@ void ScriptMain()
         // --- 5. Rotate the gameplay camera directly with smoothed gyro ------------
         // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
         // never during NPC interactions or melee.
+        float camHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
+        float camPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH();
+        float newHeading = camHeading;
+        float newPitch   = camPitch;
         bool isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
         if (isAiming && g_gyro.readSuccess)
         {
-            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f); // Yaw -> left/right
-            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
+            newHeading = camHeading + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f); // Yaw -> left/right
+            newPitch   = camPitch   + (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
             CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 1.0f);
             CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 1.0f);
         }
@@ -219,13 +227,23 @@ void ScriptMain()
                 " | Z: " + std::to_string(g_gyro.smoothedGyro[2]),
                 0.05f, 0.09f, 0, 255, 0);
 
+            DrawText(
+                "Cam Relative -> Heading: " + std::to_string(camHeading) +
+                " | Pitch: " + std::to_string(camPitch),
+                0.05f, 0.11f, 255, 255, 0);
+
+            DrawText(
+                "Cam Target   -> Heading: " + std::to_string(newHeading) +
+                " | Pitch: " + std::to_string(newPitch),
+                0.05f, 0.13f, 255, 165, 0);
+
             if (!g_gyro.sdlError.empty())
             {
-                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.11f, 255, 0, 0);
+                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.15f, 255, 0, 0);
             }
             else if (!g_gyro.gamepad)
             {
-                DrawText("No gamepad detected - connect one", 0.05f, 0.11f, 255, 255, 0);
+                DrawText("No gamepad detected - connect one", 0.05f, 0.15f, 255, 255, 0);
             }
         }
 

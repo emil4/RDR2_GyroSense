@@ -1,0 +1,5 @@
+# Build output
+build/
+
+# Runtime config (generated in the game directory)
+RDR2_GyroSense.ini

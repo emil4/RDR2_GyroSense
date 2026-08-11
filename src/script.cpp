@@ -45,6 +45,11 @@ struct GyroState
     float sensitivityX = 1500.0f;
     float sensitivityY = 1500.0f;
 
+    // Thumbstick look sensitivity (horizontal/vertical) - same high scale as the
+    // gyro sensitivities so the stick can compete with the gyro deltas.
+    float stickSensitivityX = 1500.0f;
+    float stickSensitivityY = 1500.0f;
+
     // Diagnostics / UI.
     bool        sdlInitOk            = false;
     bool        gamepadOpened        = false;
@@ -82,6 +87,12 @@ static void LoadSettings()
 
     GetPrivateProfileStringA("Settings", "SensitivityY", "75.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.sensitivityY = std::stof(buf); } catch (...) {}
+
+    GetPrivateProfileStringA("Settings", "StickSensitivityX", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.stickSensitivityX = std::stof(buf); } catch (...) {}
+
+    GetPrivateProfileStringA("Settings", "StickSensitivityY", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.stickSensitivityY = std::stof(buf); } catch (...) {}
 
     g_gyro.showOverlay = GetPrivateProfileIntA("Settings", "ShowOverlay", 1, ".\\RDR2_GyroSense.ini");
 }
@@ -208,35 +219,27 @@ void ScriptMain()
         }
 
         // --- 5. Rotate the gameplay camera directly with smoothed gyro ------------
+        // Right-stick deflection (INPUT_LOOK_LR = 1, INPUT_LOOK_UD = 2) is read every
+        // tick so it can be mixed into the camera and shown on the debug overlay. If
+        // the script-driven camera override disables the look controls, the normal
+        // channel can report 0.0f - fall back to the raw disabled channel in that case.
+        float stickX = PAD::GET_CONTROL_NORMAL(0, 1);
+        float stickY = PAD::GET_CONTROL_NORMAL(0, 2);
+        if (stickX == 0.0f && stickY == 0.0f)
+        {
+            stickX = PAD::GET_DISABLED_CONTROL_NORMAL(0, 1);
+            stickY = PAD::GET_DISABLED_CONTROL_NORMAL(0, 2);
+        }
+
         // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
         // never during NPC interactions or melee.
         bool isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
         if (isAiming && g_gyro.readSuccess)
         {
-            // Read the physical right-stick deflection (INPUT_LOOK_LR = 1, INPUT_LOOK_UD = 2).
-            // If the script-driven camera override disables the look controls, the normal
-            // channel can report 0.0f - fall back to the raw disabled channel in that case.
-            float stickX = PAD::GET_CONTROL_NORMAL(0, 1);
-            float stickY = PAD::GET_CONTROL_NORMAL(0, 2);
-            if (stickX == 0.0f && stickY == 0.0f)
-            {
-                stickX = PAD::GET_DISABLED_CONTROL_NORMAL(0, 1);
-                stickY = PAD::GET_DISABLED_CONTROL_NORMAL(0, 2);
-            }
-
-            // Game's built-in controller look sensitivity from the player profile settings.
-            // NOTE: RDR2 does not expose PAD::GET_PROFILE_SETTING - verified against the
-            // official RDR3 native database (absent from PAD, PLAYER and MISC as well).
-            // A neutral 1.0f baseline is used; the multiplier structure is preserved so a
-            // real profile value can be dropped in without touching the mixing formulas.
-            float gameSens = 1.0f;
-
-            // Balance the stick speed so it feels natural alongside the high gyro gains.
-            float stickMultiplier = gameSens * 0.5f;
-
-            // Mix BOTH the gyro deltas and the thumbstick input before writing the camera back.
-            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f) + (stickX * stickMultiplier); // Yaw -> left/right
-            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f) + (stickY * stickMultiplier); // Pitch inverted -> tilt up looks up
+            // Mix BOTH the gyro deltas and the thumbstick input before writing the camera
+            // back. Stick deltas use the INI sensitivities (same high scale as the gyro).
+            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f) + (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
+            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f) + (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
             CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
             CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
         }
@@ -260,7 +263,9 @@ void ScriptMain()
             DrawText(
                 "Gyro (smoothed) X: " + std::to_string(g_gyro.smoothedGyro[0]) +
                 " | Y: " + std::to_string(g_gyro.smoothedGyro[1]) +
-                " | Z: " + std::to_string(g_gyro.smoothedGyro[2]),
+                " | Z: " + std::to_string(g_gyro.smoothedGyro[2]) +
+                " | Stick X: " + std::to_string(stickX) +
+                " Y: " + std::to_string(stickY),
                 0.05f, 0.09f, 0, 255, 0);
 
             if (!g_gyro.sdlError.empty())

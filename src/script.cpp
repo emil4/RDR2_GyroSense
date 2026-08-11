@@ -41,9 +41,9 @@ struct GyroState
 
     // EMA smoothing factor (lower = smoother but more lag) and split camera
     // sensitivity (horizontal/vertical) - loaded from RDR2_GyroSense.ini.
-    float alpha        = 1.0f;
-    float sensitivityX = 1500.0f;
-    float sensitivityY = 1500.0f;
+    float alpha            = 1.0f;
+    float gyroSensitivityX = 1500.0f;
+    float gyroSensitivityY = 1500.0f;
 
     // Thumbstick look sensitivity (horizontal/vertical) - same high scale as the
     // gyro sensitivities so the stick can compete with the gyro deltas.
@@ -82,11 +82,11 @@ static void LoadSettings()
     GetPrivateProfileStringA("Settings", "Alpha", "0.001", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.alpha = std::stof(buf); } catch (...) {}
 
-    GetPrivateProfileStringA("Settings", "SensitivityX", "50.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
-    try { g_gyro.sensitivityX = std::stof(buf); } catch (...) {}
+    GetPrivateProfileStringA("Settings", "GyroSensitivityX", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.gyroSensitivityX = std::stof(buf); } catch (...) {}
 
-    GetPrivateProfileStringA("Settings", "SensitivityY", "75.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
-    try { g_gyro.sensitivityY = std::stof(buf); } catch (...) {}
+    GetPrivateProfileStringA("Settings", "GyroSensitivityY", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.gyroSensitivityY = std::stof(buf); } catch (...) {}
 
     GetPrivateProfileStringA("Settings", "StickSensitivityX", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.stickSensitivityX = std::stof(buf); } catch (...) {}
@@ -219,27 +219,28 @@ void ScriptMain()
         }
 
         // --- 5. Rotate the gameplay camera directly with smoothed gyro ------------
-        // Right-stick deflection (INPUT_LOOK_LR = 1, INPUT_LOOK_UD = 2) is read every
-        // tick so it can be mixed into the camera and shown on the debug overlay. If
-        // the script-driven camera override disables the look controls, the normal
-        // channel can report 0.0f - fall back to the raw disabled channel in that case.
-        float stickX = PAD::GET_CONTROL_NORMAL(0, 1);
-        float stickY = PAD::GET_CONTROL_NORMAL(0, 2);
-        if (stickX == 0.0f && stickY == 0.0f)
-        {
-            stickX = PAD::GET_DISABLED_CONTROL_NORMAL(0, 1);
-            stickY = PAD::GET_DISABLED_CONTROL_NORMAL(0, 2);
-        }
-
         // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
         // never during NPC interactions or melee.
         bool isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
+
+        // Normalized right-stick deflection (-1.0f..1.0f) read straight off the SDL3
+        // gamepad hardware. Declared here so the debug overlay can show the values;
+        // they are refreshed from SDL inside the aiming block below.
+        float stickX = 0.0f;
+        float stickY = 0.0f;
+
         if (isAiming && g_gyro.readSuccess)
         {
+            // Raw right-stick axes from SDL3, normalized to the -1.0f..1.0f range.
+            int16_t rawStickX = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
+            int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
+            stickX = rawStickX / 32767.0f;
+            stickY = rawStickY / 32767.0f;
+
             // Mix BOTH the gyro deltas and the thumbstick input before writing the camera
             // back. Stick deltas use the INI sensitivities (same high scale as the gyro).
-            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f) + (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
-            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f) + (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
+            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) + (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
+            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) + (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
             CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
             CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
         }
@@ -260,21 +261,28 @@ void ScriptMain()
                 " | Aiming: " + std::to_string(isAiming ? 1 : 0),
                 0.05f, 0.07f, 255, 255, 255);
 
+            // Green gyro line: an explicit '+' keeps the text width stable when the
+            // sign toggles, so the line does not twitch horizontally.
             DrawText(
-                "Gyro (smoothed) X: " + std::to_string(g_gyro.smoothedGyro[0]) +
-                " | Y: " + std::to_string(g_gyro.smoothedGyro[1]) +
-                " | Z: " + std::to_string(g_gyro.smoothedGyro[2]) +
-                " | Stick X: " + std::to_string(stickX) +
-                " Y: " + std::to_string(stickY),
+                std::string("Gyro (smoothed) X: ") + (g_gyro.smoothedGyro[0] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[0]) +
+                " | Y: " + (g_gyro.smoothedGyro[1] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[1]) +
+                " | Z: " + (g_gyro.smoothedGyro[2] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[2]),
                 0.05f, 0.09f, 0, 255, 0);
 
+            // Orange line: raw SDL3 right-stick diagnostics (normalized -1.0f..1.0f).
+            DrawText(
+                std::string("Stick X: ") + (stickX >= 0.0f ? "+" : "") + std::to_string(stickX) +
+                " | Y: " + (stickY >= 0.0f ? "+" : "") + std::to_string(stickY),
+                0.05f, 0.11f, 255, 165, 0);
+
+            // Pushed down to make room for the orange stick line above.
             if (!g_gyro.sdlError.empty())
             {
-                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.11f, 255, 0, 0);
+                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.13f, 255, 0, 0);
             }
             else if (!g_gyro.gamepad)
             {
-                DrawText("No gamepad detected - connect one", 0.05f, 0.11f, 255, 255, 0);
+                DrawText("No gamepad detected - connect one", 0.05f, 0.13f, 255, 255, 0);
             }
         }
 

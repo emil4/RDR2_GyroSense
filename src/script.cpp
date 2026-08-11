@@ -45,6 +45,9 @@ struct GyroState
     float gyroSensitivityX = 1500.0f;
     float gyroSensitivityY = 1500.0f;
 
+    // Gyro deadzone (rad/s): smoothed pitch/yaw below this value is zeroed out.
+    float gyroDeadzone     = 0.015f;
+
     // Thumbstick look sensitivity (horizontal/vertical) - same high scale as the
     // gyro sensitivities so the stick can compete with the gyro deltas.
     float stickSensitivityX = 1500.0f;
@@ -86,6 +89,9 @@ static void LoadSettings()
 
     GetPrivateProfileStringA("Settings", "GyroSensitivityY", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.gyroSensitivityY = std::stof(buf); } catch (...) {}
+
+    GetPrivateProfileStringA("Settings", "GyroDeadzone", "0.015", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.gyroDeadzone = std::stof(buf); } catch (...) {}
 
     GetPrivateProfileStringA("Settings", "StickSensitivityX", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.stickSensitivityX = std::stof(buf); } catch (...) {}
@@ -210,7 +216,13 @@ void ScriptMain()
         {
             g_gyro.readSuccess = SDL_GetGamepadSensorData(g_gyro.gamepad, SDL_SENSOR_GYRO, g_gyro.gyroData, 3);
             for (int i = 0; i < 3; ++i)
+            {
                 g_gyro.smoothedGyro[i] = (g_gyro.gyroData[i] * g_gyro.alpha) + (g_gyro.smoothedGyro[i] * (1.0f - g_gyro.alpha));
+
+                // Deadzone filter: zero out drift on Pitch (0) and Yaw (1) below the threshold.
+                if ((i == 0 || i == 1) && std::fabs(g_gyro.smoothedGyro[i]) < g_gyro.gyroDeadzone)
+                    g_gyro.smoothedGyro[i] = 0.0f;
+            }
         }
 
         // --- 5. Rotate the gameplay camera directly with smoothed gyro ------------
@@ -257,12 +269,25 @@ void ScriptMain()
                 " | Aiming: " + std::to_string(isAiming ? 1 : 0),
                 0.05f, 0.07f, 255, 255, 255);
 
-            // Green gyro line: an explicit '+' keeps the text width stable when the
-            // sign toggles, so the line does not twitch horizontally.
+            // Green gyro line: live text sliders for Pitch (X) and Yaw (Y). The bar
+            // scale is tied to the deadzone so the central no-movement region stays
+            // clearly visible while the indicator tracks real-time deflection.
+            const float dzG = (g_gyro.gyroDeadzone > 0.0f ? g_gyro.gyroDeadzone : 0.015f) * 10.0f;
+            const float sliderScale = 1.0f / dzG;
+            auto slider = [](float value, float scale) -> std::string
+            {
+                const int width = 15, center = width / 2;
+                float t = value * scale;
+                if (t > 1.0f) t = 1.0f;
+                else if (t < -1.0f) t = -1.0f;
+                int pos = center + static_cast<int>(t * (width - center - 1) + (t >= 0.0f ? 0.5f : -0.5f));
+                std::string bar(width, ' ');
+                bar[pos] = '|';
+                return "[" + bar + "]";
+            };
             DrawText(
-                std::string("Gyro (smoothed) X: ") + (g_gyro.smoothedGyro[0] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[0]) +
-                " | Y: " + (g_gyro.smoothedGyro[1] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[1]) +
-                " | Z: " + (g_gyro.smoothedGyro[2] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[2]),
+                std::string("Pitch: ") + slider(g_gyro.smoothedGyro[0], sliderScale) +
+                "  Yaw: " + slider(g_gyro.smoothedGyro[1], sliderScale),
                 0.05f, 0.09f, 0, 255, 0);
 
             // Orange line: raw SDL3 right-stick diagnostics (normalized -1.0f..1.0f).

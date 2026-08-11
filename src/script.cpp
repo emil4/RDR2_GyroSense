@@ -241,21 +241,13 @@ void ScriptMain()
                 " | Z: " + std::to_string(g_gyro.smoothedGyro[2]),
                 0.05f, 0.09f, 0, 255, 0);
 
-            DrawText(
-                "Target Entity Detected: " + std::to_string(g_gyro.targetEntityDetected ? 1 : 0),
-                0.05f, 0.15f, 255, 0, 255);
-
-            DrawText(
-                "[F2] Lockon Disabled Status: " + std::to_string(g_gyro.lockonDisabled ? 1 : 0),
-                0.05f, 0.17f, 255, 255, 255);
-
             if (!g_gyro.sdlError.empty())
             {
-                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.19f, 255, 0, 0);
+                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.11f, 255, 0, 0);
             }
             else if (!g_gyro.gamepad)
             {
-                DrawText("No gamepad detected - connect one", 0.05f, 0.19f, 255, 255, 0);
+                DrawText("No gamepad detected - connect one", 0.05f, 0.11f, 255, 255, 0);
             }
         }
 

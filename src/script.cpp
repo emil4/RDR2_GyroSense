@@ -53,6 +53,10 @@ struct GyroState
     float stickSensitivityX = 1500.0f;
     float stickSensitivityY = 1500.0f;
 
+    // Right-stick deadzone (normalized -1.0..1.0 units): cuts off small deflections
+    // near center that would otherwise cause slow diagonal camera crawling.
+    float stickDeadzone      = 0.052f;
+
     // Diagnostics / UI.
     bool        sdlInitOk            = false;
     bool        gamepadOpened        = false;
@@ -98,6 +102,9 @@ static void LoadSettings()
 
     GetPrivateProfileStringA("Settings", "StickSensitivityY", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.stickSensitivityY = std::stof(buf); } catch (...) {}
+
+    GetPrivateProfileStringA("Settings", "StickDeadzone", "0.052", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.stickDeadzone = std::stof(buf); } catch (...) {}
 
     g_gyro.showOverlay = GetPrivateProfileIntA("Settings", "ShowOverlay", 1, ".\\RDR2_GyroSense.ini");
 }
@@ -243,6 +250,11 @@ void ScriptMain()
             int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
             stickX = rawStickX / 32767.0f;
             stickY = rawStickY / 32767.0f;
+
+            // Deadzone cut-off: ignore small stick deflections so a worn stick resting
+            // near center can't cause slow diagonal camera crawling.
+            if (std::fabs(stickX) < g_gyro.stickDeadzone) stickX = 0.0f;
+            if (std::fabs(stickY) < g_gyro.stickDeadzone) stickY = 0.0f;
 
             // Mix BOTH the gyro deltas and the thumbstick input before writing the camera
             // back. Stick deltas use the INI sensitivities (same high scale as the gyro);

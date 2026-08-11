@@ -42,8 +42,8 @@ struct GyroState
     // EMA smoothing factor (lower = smoother but more lag) and split camera
     // sensitivity (horizontal/vertical) - loaded from RDR2_GyroSense.ini.
     float alpha        = 1.0f;
-    float sensitivityX = 100.0f;
-    float sensitivityY = 130.0f;
+    float sensitivityX = 1500.0f;
+    float sensitivityY = 1500.0f;
 
     // Diagnostics / UI.
     bool        sdlInitOk            = false;
@@ -98,12 +98,7 @@ bool IsPlayerCombatAiming(Ped playerPed)
                         || WEAPON::_IS_WEAPON_THROWABLE(weaponHash)
                         || WEAPON::_IS_WEAPON_LASSO(weaponHash)
                         || WEAPON::_IS_WEAPON_BINOCULARS(weaponHash);
-    // Theory 1: block gyro while the weapon is mid draw/holster animation.
-    // RDR2 has no IS_PED_EQUIPPING_WEAPON native, so equipping is detected as
-    // "weapon not yet ready to shoot" (false during draw/holster animations).
-    bool isReadyToShoot = WEAPON::IS_PED_WEAPON_READY_TO_SHOOT(playerPed);
-    bool isEquipping = !isReadyToShoot;
-    return hasRangedWeapon && (PAD::IS_CONTROL_PRESSED(0, 32) || PLAYER::IS_PLAYER_FREE_AIMING(PLAYER::PLAYER_ID())) && !isEquipping && isReadyToShoot;
+  return (PLAYER::IS_PLAYER_FREE_AIMING(PLAYER::PLAYER_ID()) || PAD::IS_CONTROL_PRESSED(0, 32)) && hasRangedWeapon;
 }
 
 // --- Gamepad discovery -------------------------------------------------------
@@ -220,8 +215,8 @@ void ScriptMain()
         {
             float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f); // Yaw -> left/right
             float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
-            CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 1.0f);
-            CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 1.0f);
+            CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
+            CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
         }
 
         // --- 6. On-screen debug overlay ------------------------------------------

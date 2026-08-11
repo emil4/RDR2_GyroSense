@@ -46,11 +46,13 @@ struct GyroState
     float sensitivityY = 130.0f;
 
     // Diagnostics / UI.
-    bool        sdlInitOk     = false;
-    bool        gamepadOpened = false;
-    bool        gyroEnabled   = false;
-    bool        readSuccess   = false;
-    int         showOverlay   = 1;
+    bool        sdlInitOk            = false;
+    bool        gamepadOpened        = false;
+    bool        gyroEnabled          = false;
+    bool        readSuccess          = false;
+    bool        lockonDisabled       = false;
+    bool        targetEntityDetected = false;
+    int         showOverlay          = 1;
     std::string sdlError;
 };
 
@@ -180,6 +182,22 @@ void ScriptMain()
             OpenFirstGamepad();
         }
 
+        // F2 toggles lock-on suppression (investigating the floor-drifting issue).
+        if (GetAsyncKeyState(VK_F2) & 1)
+        {
+            g_gyro.lockonDisabled = !g_gyro.lockonDisabled;
+        }
+
+        // Track the current aim target entity every frame.
+        Entity targetEntity = 0;
+        g_gyro.targetEntityDetected = PLAYER::GET_PLAYER_TARGET_ENTITY(PLAYER::PLAYER_ID(), &targetEntity);
+
+        // Suppress lock-on mechanics while disabled (engine handles it naturally otherwise).
+        if (g_gyro.lockonDisabled)
+        {
+            PLAYER::SET_PLAYER_LOCKON(PLAYER::PLAYER_ID(), FALSE);
+        }
+
         // --- 4. Read raw gyro every tick and EMA-smooth it ------------------------
         g_gyro.readSuccess = false;
         if (g_gyro.gamepad && g_gyro.gyroEnabled)
@@ -189,21 +207,16 @@ void ScriptMain()
                 g_gyro.smoothedGyro[i] = (g_gyro.gyroData[i] * g_gyro.alpha) + (g_gyro.smoothedGyro[i] * (1.0f - g_gyro.alpha));
         }
 
-        // --- 5. Rotate the gameplay camera using absolute world rotation ----------
+        // --- 5. Rotate the gameplay camera directly with smoothed gyro ------------
         // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
         // never during NPC interactions or melee.
-        Vector3 camRot = CAM::GET_GAMEPLAY_CAM_ROT(2); // x = absolute pitch, z = absolute yaw/heading
-        float newHeading = camRot.z;
-        float newPitch   = camRot.x;
         bool isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
         if (isAiming && g_gyro.readSuccess)
         {
-            newHeading = camRot.z + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f); // Yaw -> left/right
-            newPitch   = camRot.x - (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f); // Pitch -> up/down
-            if (newPitch > 75.0f) newPitch = 75.0f;  // safety clamp so the camera can't flip
-            if (newPitch < -75.0f) newPitch = -75.0f;
-            // RDR2 has no SET_GAMEPLAY_CAM_ROT native; drive the rendering gameplay cam instead.
-            CAM::SET_CAM_ROT(CAM::GET_RENDERING_CAM(), newPitch, 0.0f, newHeading, 2);
+            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.sensitivityX * 0.01f); // Yaw -> left/right
+            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.sensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
+            CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 1.0f);
+            CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 1.0f);
         }
 
         // --- 6. On-screen debug overlay ------------------------------------------
@@ -229,22 +242,20 @@ void ScriptMain()
                 0.05f, 0.09f, 0, 255, 0);
 
             DrawText(
-                "Cam Rot -> Heading: " + std::to_string(camRot.z) +
-                " | Pitch: " + std::to_string(camRot.x),
-                0.05f, 0.11f, 255, 255, 0);
+                "Target Entity Detected: " + std::to_string(g_gyro.targetEntityDetected ? 1 : 0),
+                0.05f, 0.15f, 255, 0, 255);
 
             DrawText(
-                "Cam Target -> Heading: " + std::to_string(newHeading) +
-                " | Pitch: " + std::to_string(newPitch),
-                0.05f, 0.13f, 255, 165, 0);
+                "[F2] Lockon Disabled Status: " + std::to_string(g_gyro.lockonDisabled ? 1 : 0),
+                0.05f, 0.17f, 255, 255, 255);
 
             if (!g_gyro.sdlError.empty())
             {
-                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.15f, 255, 0, 0);
+                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.19f, 255, 0, 0);
             }
             else if (!g_gyro.gamepad)
             {
-                DrawText("No gamepad detected - connect one", 0.05f, 0.15f, 255, 255, 0);
+                DrawText("No gamepad detected - connect one", 0.05f, 0.19f, 255, 255, 0);
             }
         }
 

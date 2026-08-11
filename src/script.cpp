@@ -56,7 +56,6 @@ struct GyroState
     bool        gyroEnabled          = false;
     bool        readSuccess          = false;
     bool        lockonDisabled       = false;
-    bool        targetEntityDetected = false;
     int         showOverlay          = 1;
     std::string sdlError;
 };
@@ -199,10 +198,6 @@ void ScriptMain()
             g_gyro.lockonDisabled = !g_gyro.lockonDisabled;
         }
 
-        // Track the current aim target entity every frame.
-        Entity targetEntity = 0;
-        g_gyro.targetEntityDetected = PLAYER::GET_PLAYER_TARGET_ENTITY(PLAYER::PLAYER_ID(), &targetEntity);
-
         // Suppress lock-on mechanics while disabled (engine handles it naturally otherwise).
         if (g_gyro.lockonDisabled)
         {
@@ -238,9 +233,10 @@ void ScriptMain()
             stickY = rawStickY / 32767.0f;
 
             // Mix BOTH the gyro deltas and the thumbstick input before writing the camera
-            // back. Stick deltas use the INI sensitivities (same high scale as the gyro).
-            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) + (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
-            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) + (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
+            // back. Stick deltas use the INI sensitivities (same high scale as the gyro);
+            // they are subtracted because the SDL3 right-stick axes come back inverted.
+            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) - (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
+            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) - (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
             CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
             CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
         }

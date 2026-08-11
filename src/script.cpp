@@ -98,7 +98,12 @@ bool IsPlayerCombatAiming(Ped playerPed)
                         || WEAPON::_IS_WEAPON_THROWABLE(weaponHash)
                         || WEAPON::_IS_WEAPON_LASSO(weaponHash)
                         || WEAPON::_IS_WEAPON_BINOCULARS(weaponHash);
-    return (PLAYER::IS_PLAYER_FREE_AIMING(PLAYER::PLAYER_ID()) || PAD::IS_CONTROL_PRESSED(0, 32)) && hasRangedWeapon;
+    // Theory 1: block gyro while the weapon is mid draw/holster animation.
+    // RDR2 has no IS_PED_EQUIPPING_WEAPON native, so equipping is detected as
+    // "weapon not yet ready to shoot" (false during draw/holster animations).
+    bool isReadyToShoot = WEAPON::IS_PED_WEAPON_READY_TO_SHOOT(playerPed);
+    bool isEquipping = !isReadyToShoot;
+    return hasRangedWeapon && (PAD::IS_CONTROL_PRESSED(0, 32) || PLAYER::IS_PLAYER_FREE_AIMING(PLAYER::PLAYER_ID())) && !isEquipping && isReadyToShoot;
 }
 
 // --- Gamepad discovery -------------------------------------------------------

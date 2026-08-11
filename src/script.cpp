@@ -46,11 +46,13 @@ struct GyroState
     float sensitivityY = 130.0f;
 
     // Diagnostics / UI.
-    bool        sdlInitOk     = false;
-    bool        gamepadOpened = false;
-    bool        gyroEnabled   = false;
-    bool        readSuccess   = false;
-    int         showOverlay   = 1;
+    bool        sdlInitOk            = false;
+    bool        gamepadOpened        = false;
+    bool        gyroEnabled          = false;
+    bool        readSuccess          = false;
+    bool        lockonDisabled       = false;
+    bool        targetEntityDetected = false;
+    int         showOverlay          = 1;
     std::string sdlError;
 };
 
@@ -180,6 +182,22 @@ void ScriptMain()
             OpenFirstGamepad();
         }
 
+        // F2 toggles lock-on suppression (investigating the floor-drifting issue).
+        if (GetAsyncKeyState(VK_F2) & 1)
+        {
+            g_gyro.lockonDisabled = !g_gyro.lockonDisabled;
+        }
+
+        // Track the current aim target entity every frame.
+        Entity targetEntity = 0;
+        g_gyro.targetEntityDetected = PLAYER::GET_PLAYER_TARGET_ENTITY(PLAYER::PLAYER_ID(), &targetEntity);
+
+        // Suppress lock-on mechanics while disabled (engine handles it naturally otherwise).
+        if (g_gyro.lockonDisabled)
+        {
+            PLAYER::SET_PLAYER_LOCKON(PLAYER::PLAYER_ID(), FALSE);
+        }
+
         // --- 4. Read raw gyro every tick and EMA-smooth it ------------------------
         g_gyro.readSuccess = false;
         if (g_gyro.gamepad && g_gyro.gyroEnabled)
@@ -237,13 +255,21 @@ void ScriptMain()
                 " | Pitch: " + std::to_string(newPitch),
                 0.05f, 0.13f, 255, 165, 0);
 
+            DrawText(
+                "Target Entity Detected: " + std::to_string(g_gyro.targetEntityDetected ? 1 : 0),
+                0.05f, 0.15f, 255, 0, 255);
+
+            DrawText(
+                "[F2] Lockon Disabled Status: " + std::to_string(g_gyro.lockonDisabled ? 1 : 0),
+                0.05f, 0.17f, 255, 255, 255);
+
             if (!g_gyro.sdlError.empty())
             {
-                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.15f, 255, 0, 0);
+                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.19f, 255, 0, 0);
             }
             else if (!g_gyro.gamepad)
             {
-                DrawText("No gamepad detected - connect one", 0.05f, 0.15f, 255, 255, 0);
+                DrawText("No gamepad detected - connect one", 0.05f, 0.19f, 255, 255, 0);
             }
         }
 

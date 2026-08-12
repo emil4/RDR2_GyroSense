@@ -25,6 +25,7 @@
 
 #include "script.h"
 
+#include <cstdlib>
 #include <string>
 
 // --- Global state -----------------------------------------------------------
@@ -45,17 +46,31 @@ struct GyroState
     float gyroSensitivityX = 1500.0f;
     float gyroSensitivityY = 1500.0f;
 
-    // Gyro deadzone (rad/s): smoothed pitch/yaw below this value is zeroed out.
-    float gyroDeadzone     = 0.015f;
+    // Split gyro deadzones (rad/s) per axis: smoothed Pitch / Yaw below the matching
+    // threshold is zeroed out before it reaches the camera.
+    float gyroDeadzoneX = 0.015f; // Yaw (horizontal) threshold.
+    float gyroDeadzoneY = 0.015f; // Pitch (vertical) threshold.
 
     // Thumbstick look sensitivity (horizontal/vertical) - same high scale as the
     // gyro sensitivities so the stick can compete with the gyro deltas.
     float stickSensitivityX = 1500.0f;
     float stickSensitivityY = 1500.0f;
 
-    // Right-stick deadzone (normalized -1.0..1.0 units): cuts off small deflections
-    // near center that would otherwise cause slow diagonal camera crawling.
-    float stickDeadzone      = 0.052f;
+    // Split right-stick deadzones (normalized -1.0..1.0 units): cut off small
+    // deflections near center on each axis that would otherwise cause slow
+    // diagonal camera crawling.
+    float stickDeadzoneX = 0.052f; // Horizontal (X) threshold.
+    float stickDeadzoneY = 0.052f; // Vertical (Y) threshold.
+
+    // Global mod toggle: while false the whole SDL input pipeline and the camera
+    // writes are skipped; only the toggle hotkey and the ON/OFF pop-up run.
+    bool modEnabled = true;
+
+    // SDL_GetTicks() timestamp until which the ON/OFF pop-up stays on screen.
+    uint64_t notificationEndTime = 0;
+
+    // Toggle hotkey virtual-key code (default VK_F2 = 0x71). Loaded from the INI.
+    int toggleKey = 0x71;
 
     // Diagnostics / UI.
     bool        sdlInitOk            = false;
@@ -79,6 +94,42 @@ static void DrawText(const std::string& text, float x, float y, int r, int g, in
 }
 
 // --- Settings ----------------------------------------------------------------
+// Converts the ToggleKey INI value into a Windows virtual-key code. Accepts
+// "F1".."F24", a hexadecimal code ("0x71") or a plain integer VK code ("113").
+// Anything unparseable falls back to VK_F2 (0x71).
+static int ParseToggleKey(const char* value, int fallback = 0x71)
+{
+    if (!value || !value[0])
+        return fallback;
+
+    // "F1".."F24" -> VK_F1 (0x70) .. VK_F24 (0x87).
+    if (value[0] == 'F' || value[0] == 'f')
+    {
+        char* end = nullptr;
+        long  fn  = std::strtol(value + 1, &end, 10);
+        if (end && *end == '\0' && fn >= 1 && fn <= 24)
+            return 0x70 + static_cast<int>(fn - 1);
+    }
+
+    // "0xNN" hexadecimal VK code.
+    if (value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
+    {
+        char* end = nullptr;
+        long  vk  = std::strtol(value + 2, &end, 16);
+        if (end && *end == '\0' && vk > 0 && vk <= 0xFF)
+            return static_cast<int>(vk);
+        return fallback;
+    }
+
+    // Plain decimal VK code.
+    char* end = nullptr;
+    long  vk  = std::strtol(value, &end, 10);
+    if (end && *end == '\0' && vk > 0 && vk <= 0xFF)
+        return static_cast<int>(vk);
+
+    return fallback;
+}
+
 // Loads RDR2_GyroSense.ini from the game directory. Missing keys or a missing
 // file fall back to the defaults below (also mirrored in GyroState).
 static void LoadSettings()
@@ -94,8 +145,11 @@ static void LoadSettings()
     GetPrivateProfileStringA("Settings", "GyroSensitivityY", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.gyroSensitivityY = std::stof(buf); } catch (...) {}
 
-    GetPrivateProfileStringA("Settings", "GyroDeadzone", "0.015", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
-    try { g_gyro.gyroDeadzone = std::stof(buf); } catch (...) {}
+    GetPrivateProfileStringA("Settings", "GyroDeadzoneX", "0.015", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.gyroDeadzoneX = std::stof(buf); } catch (...) {}
+
+    GetPrivateProfileStringA("Settings", "GyroDeadzoneY", "0.015", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.gyroDeadzoneY = std::stof(buf); } catch (...) {}
 
     GetPrivateProfileStringA("Settings", "StickSensitivityX", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.stickSensitivityX = std::stof(buf); } catch (...) {}
@@ -103,10 +157,17 @@ static void LoadSettings()
     GetPrivateProfileStringA("Settings", "StickSensitivityY", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.stickSensitivityY = std::stof(buf); } catch (...) {}
 
-    GetPrivateProfileStringA("Settings", "StickDeadzone", "0.052", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
-    try { g_gyro.stickDeadzone = std::stof(buf); } catch (...) {}
+    GetPrivateProfileStringA("Settings", "StickDeadzoneX", "0.052", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.stickDeadzoneX = std::stof(buf); } catch (...) {}
+
+    GetPrivateProfileStringA("Settings", "StickDeadzoneY", "0.052", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.stickDeadzoneY = std::stof(buf); } catch (...) {}
 
     g_gyro.showOverlay = GetPrivateProfileIntA("Settings", "ShowOverlay", 1, ".\\RDR2_GyroSense.ini");
+
+    char toggleBuf[16];
+    GetPrivateProfileStringA("Settings", "ToggleKey", "F2", toggleBuf, sizeof(toggleBuf), ".\\RDR2_GyroSense.ini");
+    g_gyro.toggleKey = ParseToggleKey(toggleBuf);
 }
 
 // --- Combat aiming -----------------------------------------------------------
@@ -191,132 +252,155 @@ void ScriptMain()
     // --- 3. Main script tick loop ----------------------------------------------
     while (true)
     {
-        // Pump the SDL input cache exactly once per tick. Non-blocking: returns
-        // false immediately when the queue is empty.
-        SDL_Event event;
-        while (SDL_PollEvent(&event))
+        // Global mod toggle hotkey - processed unconditionally so the mod can
+        // always be switched off (and back on). Edge-detection: the low bit of
+        // GetAsyncKeyState is set only on the press transition.
+        if (GetAsyncKeyState(g_gyro.toggleKey) & 1)
         {
-            // Nothing to react to yet - we only need SDL's cached state refreshed.
+            g_gyro.modEnabled = !g_gyro.modEnabled;
+            g_gyro.notificationEndTime = SDL_GetTicks() + 2000; // 2-second pop-up.
         }
 
-        // Hotplug safety: re-open a gamepad if it was unplugged / not there yet.
-        if (!g_gyro.gamepad || !SDL_GamepadConnected(g_gyro.gamepad))
+        if (g_gyro.modEnabled)
         {
-            OpenFirstGamepad();
-        }
-
-        // F2 toggles lock-on suppression (investigating the floor-drifting issue).
-        if (GetAsyncKeyState(VK_F2) & 1)
-        {
-            g_gyro.lockonDisabled = !g_gyro.lockonDisabled;
-        }
-
-        // Suppress lock-on mechanics while disabled (engine handles it naturally otherwise).
-        if (g_gyro.lockonDisabled)
-        {
-            PLAYER::SET_PLAYER_LOCKON(PLAYER::PLAYER_ID(), FALSE);
-        }
-
-        // --- 4. Read raw gyro every tick and EMA-smooth it ------------------------
-        g_gyro.readSuccess = false;
-        if (g_gyro.gamepad && g_gyro.gyroEnabled)
-        {
-            g_gyro.readSuccess = SDL_GetGamepadSensorData(g_gyro.gamepad, SDL_SENSOR_GYRO, g_gyro.gyroData, 3);
-            for (int i = 0; i < 3; ++i)
+            // Pump the SDL input cache exactly once per tick. Non-blocking: returns
+            // false immediately when the queue is empty.
+            SDL_Event event;
+            while (SDL_PollEvent(&event))
             {
-                g_gyro.smoothedGyro[i] = (g_gyro.gyroData[i] * g_gyro.alpha) + (g_gyro.smoothedGyro[i] * (1.0f - g_gyro.alpha));
-
-                // Deadzone filter: zero out drift on Pitch (0) and Yaw (1) below the threshold.
-                if ((i == 0 || i == 1) && std::fabs(g_gyro.smoothedGyro[i]) < g_gyro.gyroDeadzone)
-                    g_gyro.smoothedGyro[i] = 0.0f;
+                // Nothing to react to yet - we only need SDL's cached state refreshed.
             }
-        }
 
-        // --- 5. Rotate the gameplay camera directly with smoothed gyro ------------
-        // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
-        // never during NPC interactions or melee.
-        bool isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
-
-        // Normalized right-stick deflection (-1.0f..1.0f) read straight off the SDL3
-        // gamepad hardware. Declared here so the debug overlay can show the values;
-        // they are refreshed from SDL inside the aiming block below.
-        float stickX = 0.0f;
-        float stickY = 0.0f;
-
-        if (isAiming && g_gyro.readSuccess)
-        {
-            // Raw right-stick axes from SDL3, normalized to the -1.0f..1.0f range.
-            int16_t rawStickX = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
-            int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
-            stickX = rawStickX / 32767.0f;
-            stickY = rawStickY / 32767.0f;
-
-            // Deadzone cut-off: ignore small stick deflections so a worn stick resting
-            // near center can't cause slow diagonal camera crawling.
-            if (std::fabs(stickX) < g_gyro.stickDeadzone) stickX = 0.0f;
-            if (std::fabs(stickY) < g_gyro.stickDeadzone) stickY = 0.0f;
-
-            // Mix BOTH the gyro deltas and the thumbstick input before writing the camera
-            // back. Stick deltas use the INI sensitivities (same high scale as the gyro);
-            // they are subtracted because the SDL3 right-stick axes come back inverted.
-            float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) - (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
-            float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) - (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
-            CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
-            CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
-        }
-
-        // --- 6. On-screen debug overlay ------------------------------------------
-        if (g_gyro.showOverlay)
-        {
-            DrawText(
-                "Gamepad Type: " + std::string(g_gyro.gamepad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(g_gyro.gamepad)) : "none") +
-                " | SDL: " + std::to_string(g_gyro.sdlInitOk ? 1 : 0) +
-                " | Pad: " + std::to_string(g_gyro.gamepadOpened ? 1 : 0) +
-                " | ID: " + std::to_string(g_gyro.gamepadId),
-                0.05f, 0.05f, 255, 255, 255);
-
-            DrawText(
-                "G_Enabled: " + std::to_string(g_gyro.gamepad ? SDL_GamepadSensorEnabled(g_gyro.gamepad, SDL_SENSOR_GYRO) : 0) +
-                " | Read: " + std::to_string(g_gyro.readSuccess ? 1 : 0) +
-                " | Aiming: " + std::to_string(isAiming ? 1 : 0),
-                0.05f, 0.07f, 255, 255, 255);
-
-            // Green gyro line: live text sliders for Pitch (X) and Yaw (Y). The bar
-            // scale is tied to the deadzone so the central no-movement region stays
-            // clearly visible while the indicator tracks real-time deflection.
-            const float dzG = (g_gyro.gyroDeadzone > 0.0f ? g_gyro.gyroDeadzone : 0.015f) * 10.0f;
-            const float sliderScale = 1.0f / dzG;
-            auto slider = [](float value, float scale) -> std::string
+            // Hotplug safety: re-open a gamepad if it was unplugged / not there yet.
+            if (!g_gyro.gamepad || !SDL_GamepadConnected(g_gyro.gamepad))
             {
-                const int width = 15, center = width / 2;
-                float t = value * scale;
-                if (t > 1.0f) t = 1.0f;
-                else if (t < -1.0f) t = -1.0f;
-                int pos = center + static_cast<int>(t * (width - center - 1) + (t >= 0.0f ? 0.5f : -0.5f));
-                std::string bar(width, ' ');
-                bar[pos] = '|';
-                return "[" + bar + "]";
-            };
-            DrawText(
-                std::string("Pitch: ") + slider(g_gyro.smoothedGyro[0], sliderScale) +
-                "  Yaw: " + slider(g_gyro.smoothedGyro[1], sliderScale),
-                0.05f, 0.09f, 0, 255, 0);
-
-            // Orange line: raw SDL3 right-stick diagnostics (normalized -1.0f..1.0f).
-            DrawText(
-                std::string("Stick X: ") + (stickX >= 0.0f ? "+" : "") + std::to_string(stickX) +
-                " | Y: " + (stickY >= 0.0f ? "+" : "") + std::to_string(stickY),
-                0.05f, 0.11f, 255, 165, 0);
-
-            // Pushed down to make room for the orange stick line above.
-            if (!g_gyro.sdlError.empty())
-            {
-                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.13f, 255, 0, 0);
+                OpenFirstGamepad();
             }
-            else if (!g_gyro.gamepad)
+
+            // F2 toggles lock-on suppression (investigating the floor-drifting issue).
+            if (GetAsyncKeyState(VK_F2) & 1)
             {
-                DrawText("No gamepad detected - connect one", 0.05f, 0.13f, 255, 255, 0);
+                g_gyro.lockonDisabled = !g_gyro.lockonDisabled;
             }
+
+            // Suppress lock-on mechanics while disabled (engine handles it naturally otherwise).
+            if (g_gyro.lockonDisabled)
+            {
+                PLAYER::SET_PLAYER_LOCKON(PLAYER::PLAYER_ID(), FALSE);
+            }
+
+            // --- 4. Read raw gyro every tick and EMA-smooth it --------------------
+            g_gyro.readSuccess = false;
+            if (g_gyro.gamepad && g_gyro.gyroEnabled)
+            {
+                g_gyro.readSuccess = SDL_GetGamepadSensorData(g_gyro.gamepad, SDL_SENSOR_GYRO, g_gyro.gyroData, 3);
+                for (int i = 0; i < 3; ++i)
+                {
+                    g_gyro.smoothedGyro[i] = (g_gyro.gyroData[i] * g_gyro.alpha) + (g_gyro.smoothedGyro[i] * (1.0f - g_gyro.alpha));
+                }
+            }
+
+            // --- 5. Rotate the gameplay camera directly with smoothed gyro --------
+            // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
+            // never during NPC interactions or melee.
+            bool isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
+
+            // Normalized right-stick deflection (-1.0f..1.0f) read straight off the SDL3
+            // gamepad hardware. Declared here so the debug overlay can show the values;
+            // they are refreshed from SDL inside the aiming block below.
+            float stickX = 0.0f;
+            float stickY = 0.0f;
+
+            if (isAiming && g_gyro.readSuccess)
+            {
+                // Raw right-stick axes from SDL3, normalized to the -1.0f..1.0f range.
+                int16_t rawStickX = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
+                int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
+                stickX = rawStickX / 32767.0f;
+                stickY = rawStickY / 32767.0f;
+
+                // Split deadzone cut-offs per axis: ignore small stick deflections so a
+                // worn stick resting near center can't cause slow diagonal crawling.
+                if (std::fabs(stickX) < g_gyro.stickDeadzoneX) stickX = 0.0f;
+                if (std::fabs(stickY) < g_gyro.stickDeadzoneY) stickY = 0.0f;
+
+                // Split gyro deadzone cut-offs per axis: zero out slow Pitch/Yaw drift
+                // below the matching threshold before it reaches the camera.
+                if (std::fabs(g_gyro.smoothedGyro[1]) < g_gyro.gyroDeadzoneX) g_gyro.smoothedGyro[1] = 0.0f; // Yaw -> X axis.
+                if (std::fabs(g_gyro.smoothedGyro[0]) < g_gyro.gyroDeadzoneY) g_gyro.smoothedGyro[0] = 0.0f; // Pitch -> Y axis.
+
+                // Mix BOTH the gyro deltas and the thumbstick input before writing the
+                // camera back. Stick deltas use the INI sensitivities (same high scale as
+                // the gyro); they are subtracted because the SDL3 right-stick axes come
+                // back inverted.
+                float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) - (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
+                float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) - (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
+                CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
+                CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
+            }
+
+            // --- 6. On-screen debug overlay --------------------------------------
+            if (g_gyro.showOverlay)
+            {
+                DrawText(
+                    "Gamepad Type: " + std::string(g_gyro.gamepad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(g_gyro.gamepad)) : "none") +
+                    " | SDL: " + std::to_string(g_gyro.sdlInitOk ? 1 : 0) +
+                    " | Pad: " + std::to_string(g_gyro.gamepadOpened ? 1 : 0) +
+                    " | ID: " + std::to_string(g_gyro.gamepadId),
+                    0.05f, 0.05f, 255, 255, 255);
+
+                DrawText(
+                    "G_Enabled: " + std::to_string(g_gyro.gamepad ? SDL_GamepadSensorEnabled(g_gyro.gamepad, SDL_SENSOR_GYRO) : 0) +
+                    " | Read: " + std::to_string(g_gyro.readSuccess ? 1 : 0) +
+                    " | Aiming: " + std::to_string(isAiming ? 1 : 0),
+                    0.05f, 0.07f, 255, 255, 255);
+
+                // Green gyro line: live text sliders for Pitch (X) and Yaw (Y). The bar
+                // scale is tied to the deadzone so the central no-movement region stays
+                // clearly visible while the indicator tracks real-time deflection.
+                const float dzG = (g_gyro.gyroDeadzoneX > 0.0f ? g_gyro.gyroDeadzoneX : 0.015f) * 10.0f;
+                const float sliderScale = 1.0f / dzG;
+                auto slider = [](float value, float scale) -> std::string
+                {
+                    const int width = 15, center = width / 2;
+                    float t = value * scale;
+                    if (t > 1.0f) t = 1.0f;
+                    else if (t < -1.0f) t = -1.0f;
+                    int pos = center + static_cast<int>(t * (width - center - 1) + (t >= 0.0f ? 0.5f : -0.5f));
+                    std::string bar(width, ' ');
+                    bar[pos] = '|';
+                    return "[" + bar + "]";
+                };
+                DrawText(
+                    std::string("Pitch: ") + slider(g_gyro.smoothedGyro[0], sliderScale) +
+                    "  Yaw: " + slider(g_gyro.smoothedGyro[1], sliderScale),
+                    0.05f, 0.09f, 0, 255, 0);
+
+                // Orange line: raw SDL3 right-stick diagnostics (normalized -1.0f..1.0f).
+                DrawText(
+                    std::string("Stick X: ") + (stickX >= 0.0f ? "+" : "") + std::to_string(stickX) +
+                    " | Y: " + (stickY >= 0.0f ? "+" : "") + std::to_string(stickY),
+                    0.05f, 0.11f, 255, 165, 0);
+
+                // Pushed down to make room for the orange stick line above.
+                if (!g_gyro.sdlError.empty())
+                {
+                    DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.13f, 255, 0, 0);
+                }
+                else if (!g_gyro.gamepad)
+                {
+                    DrawText("No gamepad detected - connect one", 0.05f, 0.13f, 255, 255, 0);
+                }
+            }
+        } // end if (g_gyro.modEnabled)
+
+        // --- Mod ON/OFF pop-up notification --------------------------------------
+        if (SDL_GetTicks() < g_gyro.notificationEndTime)
+        {
+            if (g_gyro.modEnabled)
+                DrawText("RDR2 GyroSense: ON", 0.5f, 0.2f, 0, 255, 0);
+            else
+                DrawText("RDR2 GyroSense: OFF", 0.5f, 0.2f, 255, 0, 0);
         }
 
         scriptWait(0);

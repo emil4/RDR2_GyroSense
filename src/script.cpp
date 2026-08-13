@@ -96,6 +96,14 @@ struct GyroState
     float stickContribution    = 0.0f;
     float finalHeading         = 0.0f;
     float finalPitch           = 0.0f;
+
+    // Virtual camera angle integration (accumulator): the game camera is snap-
+    // shot into these once when aiming begins, then ONLY the gyro/thumbstick
+    // deltas are accumulated each frame - never re-reading the engine's live
+    // camera - so the native sniper sway cannot contaminate the angles.
+    float virtualHeading      = 0.0f;
+    float virtualPitch        = 0.0f;
+    bool  wasAimingTransition = false;
 };
 
 static GyroState g_gyro;
@@ -345,6 +353,17 @@ void ScriptMain()
 
             if (isAiming && g_gyro.readSuccess)
             {
+                // First frame of aiming: snapshot the game camera ONCE into the
+                // virtual accumulator. From here on we integrate ONLY our gyro and
+                // thumbstick deltas - never re-reading the engine's live camera -
+                // so the native sniper sway cannot contaminate the angles.
+                if (!g_gyro.wasAimingTransition)
+                {
+                    g_gyro.virtualHeading      = g_gyro.currentHeading;
+                    g_gyro.virtualPitch        = g_gyro.currentPitch;
+                    g_gyro.wasAimingTransition = true;
+                }
+
                 // Raw right-stick axes from SDL3, normalized to the -1.0f..1.0f range.
                 int16_t rawStickX = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
                 int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
@@ -381,16 +400,24 @@ void ScriptMain()
                 g_gyro.gyroContribution     = g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f * currentMultiplier;
                 g_gyro.stickContribution    = stickX * g_gyro.stickSensitivityX * 0.01f * currentMultiplier;
 
-                // Mix BOTH the gyro deltas and the thumbstick input before writing the
-                // camera back. Stick deltas use the INI sensitivities (same high scale as
-                // the gyro); they are subtracted because the SDL3 right-stick axes come
-                // back inverted. The zoom multiplier applies to every term.
-                float newHeading = g_gyro.currentHeading + g_gyro.gyroContribution - g_gyro.stickContribution; // Yaw -> left/right
-                float newPitch   = g_gyro.currentPitch + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier); // Pitch inverted -> tilt up looks up
-                g_gyro.finalHeading = newHeading;
-                g_gyro.finalPitch   = newPitch;
-                CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
-                CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
+                // Integrate the deltas directly into the virtual accumulator instead
+                // of re-reading the engine's live camera every frame. Stick deltas
+                // are subtracted because the SDL3 right-stick axes come back inverted.
+                // The zoom multiplier applies to every term.
+                g_gyro.virtualHeading += g_gyro.gyroContribution - g_gyro.stickContribution;
+                g_gyro.virtualPitch   += (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier);
+
+                // Hard clamp on the virtual pitch so the camera cannot flip over.
+                if (g_gyro.virtualPitch > 75.0f) g_gyro.virtualPitch = 75.0f;
+                else if (g_gyro.virtualPitch < -75.0f) g_gyro.virtualPitch = -75.0f;
+
+                // Map the integrated angles into the Yellow "FINAL" overlay lines.
+                g_gyro.finalHeading = g_gyro.virtualHeading;
+                g_gyro.finalPitch   = g_gyro.virtualPitch;
+
+                // Feed the pure integrated coordinates back to the engine.
+                CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(g_gyro.virtualHeading, 0.1f);
+                CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(g_gyro.virtualPitch, 0.1f);
             }
         }
         else
@@ -492,6 +519,13 @@ void ScriptMain()
                 DrawText("RDR2 GyroSense: ON", 0.5f, 0.2f, 0, 255, 0);
             else
                 DrawText("RDR2 GyroSense: OFF", 0.5f, 0.2f, 255, 0, 0);
+        }
+
+        // Not aiming anymore: clear the transition flag so the next aim begins
+        // with a fresh snapshot of the game camera into the virtual accumulator.
+        if (!isAiming)
+        {
+            g_gyro.wasAimingTransition = false;
         }
 
         scriptWait(0);

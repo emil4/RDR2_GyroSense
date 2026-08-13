@@ -340,10 +340,16 @@ void ScriptMain()
                 if (std::fabs(g_gyro.smoothedGyro[1]) < g_gyro.gyroDeadzoneX) g_gyro.smoothedGyro[1] = 0.0f; // Yaw -> X axis.
                 if (std::fabs(g_gyro.smoothedGyro[0]) < g_gyro.gyroDeadzoneY) g_gyro.smoothedGyro[0] = 0.0f; // Pitch -> Y axis.
 
-                // Dynamic sensitivity multiplier: while looking through an optical
-                // scope or binoculars, scale BOTH the gyro and thumbstick deltas so
-                // the zoomed camera stays precise instead of overshooting.
-                bool isUsingScope = CAM::_IS_AIM_CAM_USING_SCOPE();
+                // Dynamic sensitivity multiplier: while looking through a zoom
+                // scope, scale BOTH the gyro and thumbstick deltas so the zoomed
+                // camera stays precise instead of overshooting.
+                Hash weaponHash = 0;
+                WEAPON::GET_CURRENT_PED_WEAPON(PLAYER::PLAYER_PED_ID(), &weaponHash, true, 0, true);
+                // Bulletproof detection: the first-person camera is active for
+                // sniper scopes and binoculars automatically; also accept an
+                // explicitly equipped binocular (0x7F23B6A7 = WEAPON_BINOCULARS).
+                bool isUsingScope = CAM::IS_FIRST_PERSON_CAMERA_ACTIVE(0, 0, 0)
+                                 || weaponHash == MISC::GET_HASH_KEY("WEAPON_BINOCULARS");
                 float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
 
                 // Mix BOTH the gyro deltas and the thumbstick input before writing the

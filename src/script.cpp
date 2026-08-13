@@ -298,11 +298,10 @@ void ScriptMain()
         g_gyro.currentPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH();
 
         // Loop-scope diagnostics so Section 6 can render them unconditionally.
-        bool  isAiming      = false;
-        float stickX        = 0.0f;
-        float stickY        = 0.0f;
-        bool  isUsingScope  = false;
-        bool  isAimCamReady = false;
+        bool  isAiming     = false;
+        float stickX       = 0.0f;
+        float stickY       = 0.0f;
+        bool  isUsingScope = false;
 
         if (g_gyro.modEnabled)
         {
@@ -350,16 +349,12 @@ void ScriptMain()
 
             // Precise Alloc8or sniper scope detection via the official
             // _IS_PLAYER_IN_SCOPE native (0x04D7F33640662FA2): returns TRUE only
-            // while actively looking through a rifle scope. Evaluated here so the
-            // aim-cam readiness flag can gate the stabilized snapshot below.
+            // while actively looking through a rifle scope. Gates which camera
+            // control path is used below (virtual accumulator vs direct math).
             Hash weaponHash = 0;
             WEAPON::GET_CURRENT_PED_WEAPON(PLAYER::PLAYER_PED_ID(), &weaponHash, true, 0, true);
             bool isSniperScope = invoke<BOOL>(0x04D7F33640662FA2, PLAYER::PLAYER_ID()) != 0;
             isUsingScope = isSniperScope || (weaponHash == MISC::GET_HASH_KEY("WEAPON_BINOCULARS"));
-
-            // Combat aiming lens fully active: the engine's aiming matrix has been
-            // entered (or the player is already looking through a scope/binoculars).
-            isAimCamReady = CAM::IS_AIM_CAM_ACTIVE() || isUsingScope;
 
             // Normalized right-stick deflection (-1.0f..1.0f) read straight off the SDL3
             // gamepad hardware; refreshed from SDL inside the aiming block below.
@@ -368,17 +363,6 @@ void ScriptMain()
 
             if (isAiming && g_gyro.readSuccess)
             {
-                // --- STEP 2: Experimental stabilized snapshot (Roll back this block if aiming jerks) ---
-                // Wait until the engine's aiming lens is fully active before capturing
-                // the initial angles, so the transition does not freeze the camera
-                // mid-sway on the very first frame of the aim button.
-                if (isAimCamReady && !g_gyro.wasAimingTransition)
-                {
-                    g_gyro.virtualHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
-                    g_gyro.virtualPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH();
-                    g_gyro.wasAimingTransition = true;
-                }
-
                 // Raw right-stick axes from SDL3, normalized to the -1.0f..1.0f range.
                 int16_t rawStickX = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
                 int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
@@ -397,8 +381,7 @@ void ScriptMain()
 
                 // Dynamic sensitivity multiplier: while looking through a zoom
                 // scope, scale BOTH the gyro and thumbstick deltas so the zoomed
-                // camera stays precise instead of overshooting. isUsingScope is
-                // evaluated above for the aim-cam readiness / scope detection.
+                // camera stays precise instead of overshooting.
                 float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
 
                 // Capture the exact intermediate values of the camera formula into
@@ -408,28 +391,58 @@ void ScriptMain()
                 g_gyro.gyroContribution     = g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f * currentMultiplier;
                 g_gyro.stickContribution    = stickX * g_gyro.stickSensitivityX * 0.01f * currentMultiplier;
 
-                // Integrate the deltas directly into the virtual accumulator instead
-                // of re-reading the engine's live camera every frame. Stick deltas
-                // are subtracted because the SDL3 right-stick axes come back inverted.
-                // The zoom multiplier applies to every term.
-                g_gyro.virtualHeading += g_gyro.gyroContribution - g_gyro.stickContribution;
-                g_gyro.virtualPitch   += (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier);
+                if (isUsingScope)
+                {
+                    // --- Sniper scope / binoculars: virtual angle accumulator ---
+                    // On the very first frame take a snapshot of the game camera into
+                    // the accumulator, then integrate ONLY our deltas so the engine's
+                    // native sway cannot create a feedback loop.
+                    if (!g_gyro.wasAimingTransition)
+                    {
+                        g_gyro.virtualHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
+                        g_gyro.virtualPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH();
+                        g_gyro.wasAimingTransition = true;
+                    }
 
-                // --- STEP 1: Angle wrap-around logic (Safe to keep) ---
-                while (g_gyro.virtualHeading > 180.0f)  g_gyro.virtualHeading -= 360.0f;
-                while (g_gyro.virtualHeading < -180.0f) g_gyro.virtualHeading += 360.0f;
+                    g_gyro.virtualHeading += g_gyro.gyroContribution - g_gyro.stickContribution;
+                    g_gyro.virtualPitch   += (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier);
 
-                // Hard clamp on the virtual pitch so the camera cannot flip over.
-                if (g_gyro.virtualPitch > 75.0f) g_gyro.virtualPitch = 75.0f;
-                else if (g_gyro.virtualPitch < -75.0f) g_gyro.virtualPitch = -75.0f;
+                    // --- STEP 1: Angle wrap-around logic (Safe to keep) ---
+                    while (g_gyro.virtualHeading > 180.0f)  g_gyro.virtualHeading -= 360.0f;
+                    while (g_gyro.virtualHeading < -180.0f) g_gyro.virtualHeading += 360.0f;
 
-                // Map the integrated angles into the Yellow "FINAL" overlay lines.
-                g_gyro.finalHeading = g_gyro.virtualHeading;
-                g_gyro.finalPitch   = g_gyro.virtualPitch;
+                    // Hard clamp on the virtual pitch so the camera cannot flip over.
+                    if (g_gyro.virtualPitch > 75.0f) g_gyro.virtualPitch = 75.0f;
+                    else if (g_gyro.virtualPitch < -75.0f) g_gyro.virtualPitch = -75.0f;
 
-                // Feed the pure integrated coordinates back to the engine.
-                CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(g_gyro.virtualHeading, 0.1f);
-                CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(g_gyro.virtualPitch, 0.1f);
+                    // Yellow "FINAL" telemetry lines show the integrated coordinates.
+                    g_gyro.finalHeading = g_gyro.virtualHeading;
+                    g_gyro.finalPitch   = g_gyro.virtualPitch;
+
+                    // Feed the pure integrated coordinates back to the engine.
+                    CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(g_gyro.virtualHeading, 0.1f);
+                    CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(g_gyro.virtualPitch, 0.1f);
+                }
+                else
+                {
+                    // --- Standard 3rd-person over-the-shoulder aiming: direct math ---
+                    // Bypass the virtual accumulator entirely and modify the engine's
+                    // relative camera directly, frame by frame. currentMultiplier is
+                    // 1.0f here (no scope), so it is omitted from every term.
+                    float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) - (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
+                    float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) - (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
+
+                    // Yellow "FINAL" telemetry lines show the active direct values.
+                    g_gyro.finalHeading = newHeading;
+                    g_gyro.finalPitch   = newPitch;
+
+                    CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
+                    CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
+
+                    // Force the transition flag down so that entering a sniper scope
+                    // later triggers a fresh snapshot on its first frame.
+                    g_gyro.wasAimingTransition = false;
+                }
             }
         }
         else
@@ -533,10 +546,12 @@ void ScriptMain()
                 DrawText("RDR2 GyroSense: OFF", 0.5f, 0.2f, 255, 0, 0);
         }
 
-        // Transition safety: the flag survives only while the combat lens is fully
-        // active AND the player is still aiming; otherwise it resets so the next
-        // aim re-snapshots the game camera into the virtual accumulator.
-        g_gyro.wasAimingTransition = isAimCamReady && isAiming;
+        // Not aiming anymore: clear the transition flag so the next aim begins
+        // with a fresh snapshot of the game camera into the virtual accumulator.
+        if (!isAiming)
+        {
+            g_gyro.wasAimingTransition = false;
+        }
 
         scriptWait(0);
     }

@@ -404,6 +404,18 @@ void ScriptMain()
                         g_gyro.wasAimingTransition = true;
                     }
 
+                    // --- PROPOSAL 1: Delta-Correction Synchronization ---
+                    // Read the engine's live heading and, if our accumulator drifted
+                    // more than 2.0 degrees from it (e.g. the game rotated Arthur's
+                    // whole body), resync to the game's actual base alignment so the
+                    // camera cannot lag behind during the forced body shuffle.
+                    float liveHeading  = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
+                    float headingDelta = std::fabs(g_gyro.virtualHeading - liveHeading);
+                    if (headingDelta > 2.0f)
+                    {
+                        g_gyro.virtualHeading = liveHeading;
+                    }
+
                     g_gyro.virtualHeading += g_gyro.gyroContribution - g_gyro.stickContribution;
                     g_gyro.virtualPitch   += (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier);
 

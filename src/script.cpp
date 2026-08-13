@@ -42,7 +42,7 @@ struct GyroState
 
     // EMA smoothing factor (lower = smoother but more lag) and split camera
     // sensitivity (horizontal/vertical) - loaded from RDR2_GyroSense.ini.
-    float alpha            = 1.0f;
+    float alpha            = 0.9f;
     float gyroSensitivityX = 1500.0f;
     float gyroSensitivityY = 1500.0f;
 
@@ -136,7 +136,7 @@ static void LoadSettings()
 {
     char buf[32];
 
-    GetPrivateProfileStringA("Settings", "Alpha", "0.001", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    GetPrivateProfileStringA("Settings", "Alpha", "0.9", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.alpha = std::stof(buf); } catch (...) {}
 
     GetPrivateProfileStringA("Settings", "GyroSensitivityX", "1500.0", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");

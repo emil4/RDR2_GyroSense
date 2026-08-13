@@ -345,11 +345,12 @@ void ScriptMain()
                 // camera stays precise instead of overshooting.
                 Hash weaponHash = 0;
                 WEAPON::GET_CURRENT_PED_WEAPON(PLAYER::PLAYER_PED_ID(), &weaponHash, true, 0, true);
-                // Bulletproof detection: the first-person camera is active for
-                // sniper scopes and binoculars automatically; also accept an
-                // explicitly equipped binocular (0x7F23B6A7 = WEAPON_BINOCULARS).
-                bool isUsingScope = CAM::IS_FIRST_PERSON_CAMERA_ACTIVE(0, 0, 0)
-                                 || weaponHash == MISC::GET_HASH_KEY("WEAPON_BINOCULARS");
+                // Precise Alloc8or sniper scope / binocular detection through a
+                // direct native hash invoke (bypasses the missing SDK wrapper):
+                // 0x5E61AA123E07E139 = specialized first person aim camera check.
+                bool isFirstPersonAim = invoke<BOOL>(0x5E61AA123E07E139);
+                bool isBinoculars    = (weaponHash == MISC::GET_HASH_KEY("WEAPON_BINOCULARS"));
+                bool isUsingScope    = isFirstPersonAim || isBinoculars;
                 float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
 
                 // Mix BOTH the gyro deltas and the thumbstick input before writing the

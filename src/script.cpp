@@ -85,6 +85,15 @@ struct GyroState
     bool        lockonDisabled       = false;
     int         showOverlay          = 1;
     std::string sdlError;
+
+    // Horizontal heading formula breakdown (Axis Y) captured every aiming frame so
+    // the debug overlay can diagnose the camera spinning term by term. Read by the
+    // text rendering section even when the aiming block did not run (last values).
+    float currentHeading       = 0.0f;
+    float currentMultiplierVal = 1.0f;
+    float gyroContribution     = 0.0f;
+    float stickContribution    = 0.0f;
+    float finalHeading         = 0.0f;
 };
 
 static GyroState g_gyro;
@@ -353,11 +362,20 @@ void ScriptMain()
                 bool isUsingScope  = isSniperScope || isBinoculars;
                 float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
 
+                // Capture the exact intermediate values of the horizontal heading
+                // formula (Axis Y) into GyroState so the overlay can diagnose the
+                // camera spinning term by term. Same operations the camera write uses.
+                g_gyro.currentHeading       = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
+                g_gyro.currentMultiplierVal = currentMultiplier;
+                g_gyro.gyroContribution     = g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f * currentMultiplier;
+                g_gyro.stickContribution    = stickX * g_gyro.stickSensitivityX * 0.01f * currentMultiplier;
+
                 // Mix BOTH the gyro deltas and the thumbstick input before writing the
                 // camera back. Stick deltas use the INI sensitivities (same high scale as
                 // the gyro); they are subtracted because the SDL3 right-stick axes come
                 // back inverted. The zoom multiplier applies to every term.
-                float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f * currentMultiplier) - (stickX * g_gyro.stickSensitivityX * 0.01f * currentMultiplier); // Yaw -> left/right
+                float newHeading = g_gyro.currentHeading + g_gyro.gyroContribution - g_gyro.stickContribution; // Yaw -> left/right
+                g_gyro.finalHeading = newHeading;
                 float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier); // Pitch inverted -> tilt up looks up
                 CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
                 CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
@@ -406,14 +424,33 @@ void ScriptMain()
                     " | Y: " + (stickY >= 0.0f ? "+" : "") + std::to_string(stickY),
                     0.05f, 0.11f, 255, 165, 0);
 
-                // Pushed down to make room for the orange stick line above.
+                // --- Horizontal heading formula breakdown (Axis Y) ---
+                // Every aiming frame the intermediate values of the newHeading
+                // formula are captured into GyroState and printed here so the
+                // horizontal camera spinning can be diagnosed term by term.
+                DrawText("--- Heading Formula Breakdown (Axis Y) ---", 0.05f, 0.13f, 255, 255, 255);
+                DrawText(
+                    std::string("CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() = ") + (g_gyro.currentHeading >= 0.0f ? "+" : "") + std::to_string(g_gyro.currentHeading),
+                    0.05f, 0.15f, 0, 255, 255);
+                DrawText(
+                    std::string("g_gyro.smoothedGyro[1] Contribution = ") + (g_gyro.gyroContribution >= 0.0f ? "+" : "") + std::to_string(g_gyro.gyroContribution),
+                    0.05f, 0.17f, 0, 255, 0);
+                DrawText(
+                    std::string("stickX Contribution = ") + (g_gyro.stickContribution >= 0.0f ? "+" : "") + std::to_string(g_gyro.stickContribution),
+                    0.05f, 0.19f, 255, 165, 0);
+                DrawText(
+                    std::string("FINAL newHeading = ") + (g_gyro.finalHeading >= 0.0f ? "+" : "") + std::to_string(g_gyro.finalHeading),
+                    0.05f, 0.21f, 255, 255, 0);
+
+                // SDL / gamepad errors pushed below the formula breakdown block to
+                // keep the layout scannable.
                 if (!g_gyro.sdlError.empty())
                 {
-                    DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.13f, 255, 0, 0);
+                    DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.24f, 255, 0, 0);
                 }
                 else if (!g_gyro.gamepad)
                 {
-                    DrawText("No gamepad detected - connect one", 0.05f, 0.13f, 255, 255, 0);
+                    DrawText("No gamepad detected - connect one", 0.05f, 0.24f, 255, 255, 0);
                 }
             }
         } // end if (g_gyro.modEnabled)

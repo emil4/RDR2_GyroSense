@@ -345,12 +345,12 @@ void ScriptMain()
                 // camera stays precise instead of overshooting.
                 Hash weaponHash = 0;
                 WEAPON::GET_CURRENT_PED_WEAPON(PLAYER::PLAYER_PED_ID(), &weaponHash, true, 0, true);
-                // Precise Alloc8or sniper scope / binocular detection through a
-                // direct native hash invoke (bypasses the missing SDK wrapper):
-                // 0x5E61AA123E07E139 = specialized first person aim camera check.
-                bool isFirstPersonAim = invoke<BOOL>(0x5E61AA123E07E139);
-                bool isBinoculars    = (weaponHash == MISC::GET_HASH_KEY("WEAPON_BINOCULARS"));
-                bool isUsingScope    = isFirstPersonAim || isBinoculars;
+                // Precise Alloc8or sniper scope detection via the official
+                // _IS_PLAYER_IN_SCOPE native (0x04D7F33640662FA2): returns TRUE
+                // only while actively looking through a rifle scope.
+                bool isSniperScope = invoke<BOOL>(0x04D7F33640662FA2, PLAYER::PLAYER_ID()) != 0;
+                bool isBinoculars  = (weaponHash == MISC::GET_HASH_KEY("WEAPON_BINOCULARS"));
+                bool isUsingScope  = isSniperScope || isBinoculars;
                 float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
 
                 // Mix BOTH the gyro deltas and the thumbstick input before writing the

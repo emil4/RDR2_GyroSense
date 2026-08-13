@@ -56,6 +56,11 @@ struct GyroState
     float stickSensitivityX = 1500.0f;
     float stickSensitivityY = 1500.0f;
 
+    // Dynamic sensitivity multiplier applied to BOTH gyro and thumbstick camera
+    // deltas while looking through a scope (sniper rifles) or binoculars. Loaded
+    // from RDR2_GyroSense.ini; values below 1.0 give fine, stable precision aiming.
+    float zoomMultiplier = 0.2f;
+
     // Split right-stick deadzones (normalized -1.0..1.0 units): cut off small
     // deflections near center on each axis that would otherwise cause slow
     // diagonal camera crawling.
@@ -162,6 +167,12 @@ static void LoadSettings()
 
     GetPrivateProfileStringA("Settings", "StickDeadzoneY", "0.052", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.stickDeadzoneY = std::stof(buf); } catch (...) {}
+
+    GetPrivateProfileStringA("Settings", "ZoomMultiplier", "0.2", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
+    try { g_gyro.zoomMultiplier = std::stof(buf); } catch (...) {}
+    // Ensure the key exists in the INI: WritePrivateProfileStringA appends it under
+    // [Settings] when missing, and updates it in place when already present.
+    WritePrivateProfileStringA("Settings", "ZoomMultiplier", buf, ".\\RDR2_GyroSense.ini");
 
     g_gyro.showOverlay = GetPrivateProfileIntA("Settings", "ShowOverlay", 1, ".\\RDR2_GyroSense.ini");
 
@@ -329,12 +340,18 @@ void ScriptMain()
                 if (std::fabs(g_gyro.smoothedGyro[1]) < g_gyro.gyroDeadzoneX) g_gyro.smoothedGyro[1] = 0.0f; // Yaw -> X axis.
                 if (std::fabs(g_gyro.smoothedGyro[0]) < g_gyro.gyroDeadzoneY) g_gyro.smoothedGyro[0] = 0.0f; // Pitch -> Y axis.
 
+                // Dynamic sensitivity multiplier: while looking through an optical
+                // scope or binoculars, scale BOTH the gyro and thumbstick deltas so
+                // the zoomed camera stays precise instead of overshooting.
+                bool isUsingScope = CAM::_IS_AIM_CAM_USING_SCOPE();
+                float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
+
                 // Mix BOTH the gyro deltas and the thumbstick input before writing the
                 // camera back. Stick deltas use the INI sensitivities (same high scale as
                 // the gyro); they are subtracted because the SDL3 right-stick axes come
-                // back inverted.
-                float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) - (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
-                float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) - (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
+                // back inverted. The zoom multiplier applies to every term.
+                float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f * currentMultiplier) - (stickX * g_gyro.stickSensitivityX * 0.01f * currentMultiplier); // Yaw -> left/right
+                float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier); // Pitch inverted -> tilt up looks up
                 CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
                 CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
             }

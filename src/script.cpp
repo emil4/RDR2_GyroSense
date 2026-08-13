@@ -86,14 +86,16 @@ struct GyroState
     int         showOverlay          = 1;
     std::string sdlError;
 
-    // Horizontal heading formula breakdown (Axis Y) captured every aiming frame so
-    // the debug overlay can diagnose the camera spinning term by term. Read by the
-    // text rendering section even when the aiming block did not run (last values).
+    // Camera formula breakdown (Yaw / Pitch) captured every tick so the debug
+    // overlay can diagnose the camera drift / sniper sway term by term. Read by
+    // the text rendering section even when the aiming block did not run.
     float currentHeading       = 0.0f;
+    float currentPitch         = 0.0f;
     float currentMultiplierVal = 1.0f;
     float gyroContribution     = 0.0f;
     float stickContribution    = 0.0f;
     float finalHeading         = 0.0f;
+    float finalPitch           = 0.0f;
 };
 
 static GyroState g_gyro;
@@ -281,6 +283,17 @@ void ScriptMain()
             g_gyro.notificationEndTime = SDL_GetTicks() + 2000; // 2-second pop-up.
         }
 
+        // Track the raw gameplay camera every frame - even while the mod is
+        // disabled - so the overlay stays live for analyzing the native sniper
+        // sway. Contributions/finals fall back to a 0.0f baseline when mod is OFF.
+        g_gyro.currentHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
+        g_gyro.currentPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH();
+
+        // Loop-scope diagnostics so Section 6 can render them unconditionally.
+        bool  isAiming = false;
+        float stickX   = 0.0f;
+        float stickY   = 0.0f;
+
         if (g_gyro.modEnabled)
         {
             // Pump the SDL input cache exactly once per tick. Non-blocking: returns
@@ -323,13 +336,12 @@ void ScriptMain()
             // --- 5. Rotate the gameplay camera directly with smoothed gyro --------
             // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
             // never during NPC interactions or melee.
-            bool isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
+            isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
 
             // Normalized right-stick deflection (-1.0f..1.0f) read straight off the SDL3
-            // gamepad hardware. Declared here so the debug overlay can show the values;
-            // they are refreshed from SDL inside the aiming block below.
-            float stickX = 0.0f;
-            float stickY = 0.0f;
+            // gamepad hardware; refreshed from SDL inside the aiming block below.
+            stickX = 0.0f;
+            stickY = 0.0f;
 
             if (isAiming && g_gyro.readSuccess)
             {
@@ -362,10 +374,9 @@ void ScriptMain()
                 bool isUsingScope  = isSniperScope || isBinoculars;
                 float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
 
-                // Capture the exact intermediate values of the horizontal heading
-                // formula (Axis Y) into GyroState so the overlay can diagnose the
-                // camera spinning term by term. Same operations the camera write uses.
-                g_gyro.currentHeading       = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
+                // Capture the exact intermediate values of the camera formula into
+                // GyroState so the overlay can diagnose the drift term by term.
+                // currentHeading/currentPitch are refreshed unconditionally every tick.
                 g_gyro.currentMultiplierVal = currentMultiplier;
                 g_gyro.gyroContribution     = g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f * currentMultiplier;
                 g_gyro.stickContribution    = stickX * g_gyro.stickSensitivityX * 0.01f * currentMultiplier;
@@ -375,85 +386,104 @@ void ScriptMain()
                 // the gyro); they are subtracted because the SDL3 right-stick axes come
                 // back inverted. The zoom multiplier applies to every term.
                 float newHeading = g_gyro.currentHeading + g_gyro.gyroContribution - g_gyro.stickContribution; // Yaw -> left/right
+                float newPitch   = g_gyro.currentPitch + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier); // Pitch inverted -> tilt up looks up
                 g_gyro.finalHeading = newHeading;
-                float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier); // Pitch inverted -> tilt up looks up
+                g_gyro.finalPitch   = newPitch;
                 CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
                 CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
             }
+        }
+        else
+        {
+            // Mod disabled: contributions and finals are not computed; report the
+            // default 0.0f baseline so the overlay never shows stale values.
+            // currentHeading/currentPitch are still refreshed unconditionally above.
+            g_gyro.gyroContribution  = 0.0f;
+            g_gyro.stickContribution = 0.0f;
+            g_gyro.finalHeading      = 0.0f;
+            g_gyro.finalPitch        = 0.0f;
+        }
 
-            // --- 6. On-screen debug overlay --------------------------------------
-            if (g_gyro.showOverlay)
+        // --- 6. On-screen debug overlay ------------------------------------------
+        // Rendered every frame - even while the mod is OFF - so the raw gameplay
+        // camera and the native sniper sway can be analyzed without interference.
+        if (g_gyro.showOverlay)
+        {
+            DrawText(
+                "Gamepad Type: " + std::string(g_gyro.gamepad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(g_gyro.gamepad)) : "none") +
+                " | SDL: " + std::to_string(g_gyro.sdlInitOk ? 1 : 0) +
+                " | Pad: " + std::to_string(g_gyro.gamepadOpened ? 1 : 0) +
+                " | ID: " + std::to_string(g_gyro.gamepadId),
+                0.05f, 0.05f, 255, 255, 255);
+
+            DrawText(
+                "G_Enabled: " + std::to_string(g_gyro.gamepad ? SDL_GamepadSensorEnabled(g_gyro.gamepad, SDL_SENSOR_GYRO) : 0) +
+                " | Read: " + std::to_string(g_gyro.readSuccess ? 1 : 0) +
+                " | Aiming: " + std::to_string(isAiming ? 1 : 0),
+                0.05f, 0.07f, 255, 255, 255);
+
+            // Green gyro line: live text sliders for Pitch (X) and Yaw (Y). The bar
+            // scale is tied to the deadzone so the central no-movement region stays
+            // clearly visible while the indicator tracks real-time deflection.
+            const float dzG = (g_gyro.gyroDeadzoneX > 0.0f ? g_gyro.gyroDeadzoneX : 0.015f) * 10.0f;
+            const float sliderScale = 1.0f / dzG;
+            auto slider = [](float value, float scale) -> std::string
             {
-                DrawText(
-                    "Gamepad Type: " + std::string(g_gyro.gamepad ? SDL_GetGamepadStringForType(SDL_GetGamepadType(g_gyro.gamepad)) : "none") +
-                    " | SDL: " + std::to_string(g_gyro.sdlInitOk ? 1 : 0) +
-                    " | Pad: " + std::to_string(g_gyro.gamepadOpened ? 1 : 0) +
-                    " | ID: " + std::to_string(g_gyro.gamepadId),
-                    0.05f, 0.05f, 255, 255, 255);
+                const int width = 15, center = width / 2;
+                float t = value * scale;
+                if (t > 1.0f) t = 1.0f;
+                else if (t < -1.0f) t = -1.0f;
+                int pos = center + static_cast<int>(t * (width - center - 1) + (t >= 0.0f ? 0.5f : -0.5f));
+                std::string bar(width, ' ');
+                bar[pos] = '|';
+                return "[" + bar + "]";
+            };
+            DrawText(
+                std::string("Pitch: ") + slider(g_gyro.smoothedGyro[0], sliderScale) +
+                "  Yaw: " + slider(g_gyro.smoothedGyro[1], sliderScale),
+                0.05f, 0.09f, 0, 255, 0);
 
-                DrawText(
-                    "G_Enabled: " + std::to_string(g_gyro.gamepad ? SDL_GamepadSensorEnabled(g_gyro.gamepad, SDL_SENSOR_GYRO) : 0) +
-                    " | Read: " + std::to_string(g_gyro.readSuccess ? 1 : 0) +
-                    " | Aiming: " + std::to_string(isAiming ? 1 : 0),
-                    0.05f, 0.07f, 255, 255, 255);
+            // Orange line: raw SDL3 right-stick diagnostics (normalized -1.0f..1.0f).
+            DrawText(
+                std::string("Stick X: ") + (stickX >= 0.0f ? "+" : "") + std::to_string(stickX) +
+                " | Y: " + (stickY >= 0.0f ? "+" : "") + std::to_string(stickY),
+                0.05f, 0.11f, 255, 165, 0);
 
-                // Green gyro line: live text sliders for Pitch (X) and Yaw (Y). The bar
-                // scale is tied to the deadzone so the central no-movement region stays
-                // clearly visible while the indicator tracks real-time deflection.
-                const float dzG = (g_gyro.gyroDeadzoneX > 0.0f ? g_gyro.gyroDeadzoneX : 0.015f) * 10.0f;
-                const float sliderScale = 1.0f / dzG;
-                auto slider = [](float value, float scale) -> std::string
-                {
-                    const int width = 15, center = width / 2;
-                    float t = value * scale;
-                    if (t > 1.0f) t = 1.0f;
-                    else if (t < -1.0f) t = -1.0f;
-                    int pos = center + static_cast<int>(t * (width - center - 1) + (t >= 0.0f ? 0.5f : -0.5f));
-                    std::string bar(width, ' ');
-                    bar[pos] = '|';
-                    return "[" + bar + "]";
-                };
-                DrawText(
-                    std::string("Pitch: ") + slider(g_gyro.smoothedGyro[0], sliderScale) +
-                    "  Yaw: " + slider(g_gyro.smoothedGyro[1], sliderScale),
-                    0.05f, 0.09f, 0, 255, 0);
+            // --- Camera formula breakdown (Yaw / Pitch) ---
+            // Every frame the intermediate values of the camera formula are captured
+            // into GyroState (currentHeading/currentPitch even while the mod is OFF)
+            // and printed here so the drift / sniper sway can be diagnosed term by term.
+            DrawText("--- Camera Formula Breakdown (Yaw / Pitch) ---", 0.05f, 0.13f, 255, 255, 255);
+            DrawText(
+                std::string("CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() = ") + (g_gyro.currentHeading >= 0.0f ? "+" : "") + std::to_string(g_gyro.currentHeading),
+                0.05f, 0.15f, 0, 255, 255);
+            DrawText(
+                std::string("CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()   = ") + (g_gyro.currentPitch >= 0.0f ? "+" : "") + std::to_string(g_gyro.currentPitch),
+                0.05f, 0.165f, 173, 216, 230);
+            DrawText(
+                std::string("g_gyro.smoothedGyro[1] Contribution = ") + (g_gyro.gyroContribution >= 0.0f ? "+" : "") + std::to_string(g_gyro.gyroContribution),
+                0.05f, 0.18f, 0, 255, 0);
+            DrawText(
+                std::string("stickX Contribution = ") + (g_gyro.stickContribution >= 0.0f ? "+" : "") + std::to_string(g_gyro.stickContribution),
+                0.05f, 0.195f, 255, 165, 0);
+            DrawText(
+                std::string("FINAL newHeading = ") + (g_gyro.finalHeading >= 0.0f ? "+" : "") + std::to_string(g_gyro.finalHeading),
+                0.05f, 0.21f, 255, 255, 0);
+            DrawText(
+                std::string("FINAL newPitch   = ") + (g_gyro.finalPitch >= 0.0f ? "+" : "") + std::to_string(g_gyro.finalPitch),
+                0.05f, 0.225f, 255, 255, 0);
 
-                // Orange line: raw SDL3 right-stick diagnostics (normalized -1.0f..1.0f).
-                DrawText(
-                    std::string("Stick X: ") + (stickX >= 0.0f ? "+" : "") + std::to_string(stickX) +
-                    " | Y: " + (stickY >= 0.0f ? "+" : "") + std::to_string(stickY),
-                    0.05f, 0.11f, 255, 165, 0);
-
-                // --- Horizontal heading formula breakdown (Axis Y) ---
-                // Every aiming frame the intermediate values of the newHeading
-                // formula are captured into GyroState and printed here so the
-                // horizontal camera spinning can be diagnosed term by term.
-                DrawText("--- Heading Formula Breakdown (Axis Y) ---", 0.05f, 0.13f, 255, 255, 255);
-                DrawText(
-                    std::string("CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() = ") + (g_gyro.currentHeading >= 0.0f ? "+" : "") + std::to_string(g_gyro.currentHeading),
-                    0.05f, 0.15f, 0, 255, 255);
-                DrawText(
-                    std::string("g_gyro.smoothedGyro[1] Contribution = ") + (g_gyro.gyroContribution >= 0.0f ? "+" : "") + std::to_string(g_gyro.gyroContribution),
-                    0.05f, 0.17f, 0, 255, 0);
-                DrawText(
-                    std::string("stickX Contribution = ") + (g_gyro.stickContribution >= 0.0f ? "+" : "") + std::to_string(g_gyro.stickContribution),
-                    0.05f, 0.19f, 255, 165, 0);
-                DrawText(
-                    std::string("FINAL newHeading = ") + (g_gyro.finalHeading >= 0.0f ? "+" : "") + std::to_string(g_gyro.finalHeading),
-                    0.05f, 0.21f, 255, 255, 0);
-
-                // SDL / gamepad errors pushed below the formula breakdown block to
-                // keep the layout scannable.
-                if (!g_gyro.sdlError.empty())
-                {
-                    DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.24f, 255, 0, 0);
-                }
-                else if (!g_gyro.gamepad)
-                {
-                    DrawText("No gamepad detected - connect one", 0.05f, 0.24f, 255, 255, 0);
-                }
+            // SDL / gamepad errors pushed below the formula breakdown block to
+            // keep the layout scannable.
+            if (!g_gyro.sdlError.empty())
+            {
+                DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.25f, 255, 0, 0);
             }
-        } // end if (g_gyro.modEnabled)
+            else if (!g_gyro.gamepad)
+            {
+                DrawText("No gamepad detected - connect one", 0.05f, 0.25f, 255, 255, 0);
+            }
+        }
 
         // --- Mod ON/OFF pop-up notification --------------------------------------
         if (SDL_GetTicks() < g_gyro.notificationEndTime)

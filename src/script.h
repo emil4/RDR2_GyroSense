@@ -1,7 +1,5 @@
 /*
- * RDR2_GyroSense - shared declarations.
- *
- * Aggregates the ScriptHookRDR2 SDK headers and SDL3.
+ * RDR2_GyroSense - shared declarations: ScriptHookRDR2 SDK headers + SDL3.
  */
 
 #pragma once
@@ -15,5 +13,5 @@
 #include "inc/main.h"
 #include "inc/SDL3/SDL.h"
 
-// Script entry point invoked by ScriptHookRDR2 on a dedicated script thread.
+// Entry point invoked by ScriptHookRDR2 on its script thread.
 void ScriptMain();

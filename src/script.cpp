@@ -1,26 +1,18 @@
 /*
  * RDR2_GyroSense - main script logic.
  *
- * Straightforward SDL3 gamepad + gyro reader, ported 1:1 from the working
- * Python (SDL2) prototype:
- *
- *   SDL_GameController*                  -> SDL_Gamepad*
+ * SDL3 gamepad + gyro reader (SDL2 Python prototype -> SDL3 C API):
  *   SDL_NumJoysticks()                   -> SDL_GetGamepads(int *count)
  *   SDL_GameControllerOpen(index)        -> SDL_OpenGamepad(SDL_JoystickID)
- *   SDL_GameControllerIsSensorEnabled()  -> SDL_GamepadSensorEnabled(gp, SDL_SENSOR_GYRO)
  *   SDL_GameControllerSetSensorEnabled() -> SDL_SetGamepadSensorEnabled(gp, SDL_SENSOR_GYRO, true)
  *   SDL_GameControllerGetSensorData()    -> SDL_GetGamepadSensorData(gp, SDL_SENSOR_GYRO, data, 3)
  *
- * There is no blocking loop anywhere: the SDL event queue is drained exactly
- * once per script tick with a non-blocking `while (SDL_PollEvent(...))`, and
- * the cached gyro vector is read straight off the gamepad right after.
- * SDL3 does all real hardware I/O on its own internal threads (e.g. HIDAPI),
- * so a separate std::thread is not needed - polling the SDL cache from the
- * ScriptHook script thread is safe and freeze-free.
+ * SDL3 performs all real HID I/O on its own threads, so the event queue is only
+ * drained once per script tick and the cached gyro vector is read right after.
+ * No blocking loop and no extra thread - the ScriptHook tick stays freeze-free.
  *
- * NOTE: if Steam Input is active it can block the gamepad sensor API; in that
- * case SDL_SetGamepadSensorEnabled() fails and the error is printed on the
- * debug overlay.
+ * NOTE: an active Steam Input layer can block the sensor API; in that case
+ * SDL_SetGamepadSensorEnabled() fails and the error is shown on the overlay.
  */
 
 #include "script.h"
@@ -29,52 +21,44 @@
 #include <string>
 
 // --- Global state -----------------------------------------------------------
-// Flat struct kept in file scope: the gamepad handle, the 3 gyro axes and the
-// status flags rendered by the on-screen debug overlay every tick.
+// Gamepad handle, gyro axes, tuning values and overlay status flags.
 struct GyroState
 {
     SDL_Gamepad*   gamepad    = nullptr;
     SDL_JoystickID gamepadId  = 0;
 
-    // Raw gyro (rad/s) and EMA-smoothed values - X, Y, Z.
+    // Raw gyro (rad/s) and EMA-smoothed values: [0] pitch, [1] yaw, [2] roll.
     float gyroData[3]     = { 0.0f, 0.0f, 0.0f };
     float smoothedGyro[3] = { 0.0f, 0.0f, 0.0f };
 
-    // EMA smoothing factor (lower = smoother but more lag) and split camera
-    // sensitivity (horizontal/vertical) - loaded from RDR2_GyroSense.ini.
+    // EMA factor (lower = smoother, more lag) and split camera sensitivity (X/Y).
     float alpha            = 0.9f;
     float gyroSensitivityX = 1500.0f;
     float gyroSensitivityY = 1500.0f;
 
-    // Split gyro deadzones (rad/s) per axis: smoothed Pitch / Yaw below the matching
-    // threshold is zeroed out before it reaches the camera.
-    float gyroDeadzoneX = 0.015f; // Yaw (horizontal) threshold.
-    float gyroDeadzoneY = 0.015f; // Pitch (vertical) threshold.
+    // Gyro deadzones (rad/s) applied to the smoothed values.
+    float gyroDeadzoneX = 0.015f; // Yaw (horizontal).
+    float gyroDeadzoneY = 0.015f; // Pitch (vertical).
 
-    // Thumbstick look sensitivity (horizontal/vertical) - same high scale as the
-    // gyro sensitivities so the stick can compete with the gyro deltas.
+    // Stick sensitivity, kept on the gyro scale so both deltas mix evenly.
     float stickSensitivityX = 1500.0f;
     float stickSensitivityY = 1500.0f;
 
-    // Dynamic sensitivity multiplier applied to BOTH gyro and thumbstick camera
-    // deltas while looking through a scope (sniper rifles) or binoculars. Loaded
-    // from RDR2_GyroSense.ini; values below 1.0 give fine, stable precision aiming.
+    // Applied to gyro + stick deltas while scoped (rifle scope / binoculars);
+    // below 1.0 for fine precision aiming.
     float zoomMultiplier = 0.2f;
 
-    // Split right-stick deadzones (normalized -1.0..1.0 units): cut off small
-    // deflections near center on each axis that would otherwise cause slow
-    // diagonal camera crawling.
-    float stickDeadzoneX = 0.052f; // Horizontal (X) threshold.
-    float stickDeadzoneY = 0.052f; // Vertical (Y) threshold.
+    // Right-stick deadzones (normalized -1.0..1.0) to kill center drift.
+    float stickDeadzoneX = 0.052f; // Horizontal.
+    float stickDeadzoneY = 0.052f; // Vertical.
 
-    // Global mod toggle: while false the whole SDL input pipeline and the camera
-    // writes are skipped; only the toggle hotkey and the ON/OFF pop-up run.
+    // Master toggle: while false the input pipeline and camera writes are skipped.
     bool modEnabled = true;
 
-    // SDL_GetTicks() timestamp until which the ON/OFF pop-up stays on screen.
+    // SDL_GetTicks() timestamp until which the ON/OFF pop-up stays visible.
     uint64_t notificationEndTime = 0;
 
-    // Toggle hotkey virtual-key code (default VK_F2 = 0x71). Loaded from the INI.
+    // Toggle hotkey virtual-key code (default VK_F2 = 0x71).
     int toggleKey = 0x71;
 
     // Diagnostics / UI.
@@ -86,9 +70,7 @@ struct GyroState
     int         showOverlay          = 1;
     std::string sdlError;
 
-    // Camera formula breakdown (Yaw / Pitch) captured every tick so the debug
-    // overlay can diagnose the camera drift / sniper sway term by term. Read by
-    // the text rendering section even when the aiming block did not run.
+    // Camera formula telemetry, refreshed every tick for the debug overlay.
     float currentHeading       = 0.0f;
     float currentPitch         = 0.0f;
     float currentMultiplierVal = 1.0f;
@@ -97,10 +79,9 @@ struct GyroState
     float finalHeading         = 0.0f;
     float finalPitch           = 0.0f;
 
-    // Virtual camera angle integration (accumulator): the game camera is snap-
-    // shot into these once when aiming begins, then ONLY the gyro/thumbstick
-    // deltas are accumulated each frame - never re-reading the engine's live
-    // camera - so the native sniper sway cannot contaminate the angles.
+    // Virtual angle accumulator: snapshotted from the game camera when aiming
+    // starts, then advanced with our own deltas only (breaks the native scope
+    // sway feedback loop).
     float virtualHeading      = 0.0f;
     float virtualPitch        = 0.0f;
     bool  wasAimingTransition = false;
@@ -109,7 +90,7 @@ struct GyroState
 static GyroState g_gyro;
 
 // --- On-screen text helper ---------------------------------------------------
-// Renders one line of text on the game overlay using the UIDEBUG natives.
+// One line of overlay text via the UIDEBUG natives.
 static void DrawText(const std::string& text, float x, float y, int r, int g, int b, float scale = 0.20f)
 {
     UIDEBUG::_BG_SET_TEXT_SCALE(scale, scale);
@@ -118,9 +99,8 @@ static void DrawText(const std::string& text, float x, float y, int r, int g, in
 }
 
 // --- Settings ----------------------------------------------------------------
-// Converts the ToggleKey INI value into a Windows virtual-key code. Accepts
-// "F1".."F24", a hexadecimal code ("0x71") or a plain integer VK code ("113").
-// Anything unparseable falls back to VK_F2 (0x71).
+// ToggleKey INI value -> Windows virtual-key code: "F1".."F24", hex "0x71" or
+// decimal "113". Unparseable input falls back to VK_F2 (0x71).
 static int ParseToggleKey(const char* value, int fallback = 0x71)
 {
     if (!value || !value[0])
@@ -135,7 +115,7 @@ static int ParseToggleKey(const char* value, int fallback = 0x71)
             return 0x70 + static_cast<int>(fn - 1);
     }
 
-    // "0xNN" hexadecimal VK code.
+    // Hex VK code.
     if (value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
     {
         char* end = nullptr;
@@ -145,7 +125,7 @@ static int ParseToggleKey(const char* value, int fallback = 0x71)
         return fallback;
     }
 
-    // Plain decimal VK code.
+    // Decimal VK code.
     char* end = nullptr;
     long  vk  = std::strtol(value, &end, 10);
     if (end && *end == '\0' && vk > 0 && vk <= 0xFF)
@@ -154,8 +134,8 @@ static int ParseToggleKey(const char* value, int fallback = 0x71)
     return fallback;
 }
 
-// Loads RDR2_GyroSense.ini from the game directory. Missing keys or a missing
-// file fall back to the defaults below (also mirrored in GyroState).
+// Reads RDR2_GyroSense.ini from the game directory; missing keys keep the
+// defaults declared in GyroState.
 static void LoadSettings()
 {
     char buf[32];
@@ -189,8 +169,7 @@ static void LoadSettings()
 
     GetPrivateProfileStringA("Settings", "ZoomMultiplier", "0.2", buf, sizeof(buf), ".\\RDR2_GyroSense.ini");
     try { g_gyro.zoomMultiplier = std::stof(buf); } catch (...) {}
-    // Ensure the key exists in the INI: WritePrivateProfileStringA appends it under
-    // [Settings] when missing, and updates it in place when already present.
+    // Write the resolved value back so the key materializes in the INI on first run.
     WritePrivateProfileStringA("Settings", "ZoomMultiplier", buf, ".\\RDR2_GyroSense.ini");
 
     g_gyro.showOverlay = GetPrivateProfileIntA("Settings", "ShowOverlay", 1, ".\\RDR2_GyroSense.ini");
@@ -201,8 +180,7 @@ static void LoadSettings()
 }
 
 // --- Combat aiming -----------------------------------------------------------
-// Simple and stable: gun/bow in hand + aiming input. Returns true only during
-// weapon combat aiming - never during NPC interactions or melee.
+// True only while aiming a ranged weapon (never during NPC interaction / melee).
 bool IsPlayerCombatAiming(Ped playerPed)
 {
     Hash weaponHash = 0;
@@ -216,11 +194,10 @@ bool IsPlayerCombatAiming(Ped playerPed)
 }
 
 // --- Gamepad discovery -------------------------------------------------------
-// Scan all connected gamepads, open the first valid one and explicitly enable
-// its gyro, mirroring the Python prototype.
+// Opens the first connected gamepad and enables its gyro sensor.
 static void OpenFirstGamepad()
 {
-    // Close a previously opened gamepad first.
+    // Release the previously opened gamepad.
     if (g_gyro.gamepad)
     {
         SDL_CloseGamepad(g_gyro.gamepad);
@@ -237,7 +214,7 @@ static void OpenFirstGamepad()
     {
         if (!SDL_IsGamepad(gamepads[i]))
         {
-            continue; // Not gamepad-capable, skip it.
+            continue; // Not gamepad capable.
         }
 
         g_gyro.gamepad = SDL_OpenGamepad(gamepads[i]);
@@ -250,7 +227,7 @@ static void OpenFirstGamepad()
     }
     SDL_free(gamepads);
 
-    // Explicitly enable the gyro on the opened gamepad.
+    // Enable the gyro explicitly (fails under Steam Input).
     if (g_gyro.gamepad && SDL_GamepadHasSensor(g_gyro.gamepad, SDL_SENSOR_GYRO))
     {
         g_gyro.gyroEnabled = SDL_SetGamepadSensorEnabled(g_gyro.gamepad, SDL_SENSOR_GYRO, true);
@@ -282,50 +259,52 @@ void ScriptMain()
     // --- 3. Main script tick loop ----------------------------------------------
     while (true)
     {
-        // Global mod toggle hotkey - processed unconditionally so the mod can
-        // always be switched off (and back on). Edge-detection: the low bit of
-        // GetAsyncKeyState is set only on the press transition.
+        // Toggle hotkey: handled unconditionally so the mod can always be turned
+        // off again. The low bit of GetAsyncKeyState is the press transition.
         if (GetAsyncKeyState(g_gyro.toggleKey) & 1)
         {
             g_gyro.modEnabled = !g_gyro.modEnabled;
-            g_gyro.notificationEndTime = SDL_GetTicks() + 2000; // 2-second pop-up.
+            g_gyro.notificationEndTime = SDL_GetTicks() + 2000; // 2 s pop-up.
         }
 
-        // Track the raw gameplay camera every frame - even while the mod is
-        // disabled - so the overlay stays live for analyzing the native sniper
-        // sway. Contributions/finals fall back to a 0.0f baseline when mod is OFF.
+        // Track the live gameplay camera every tick, even with the mod OFF, so the
+        // overlay keeps showing the engine's own camera values.
         g_gyro.currentHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
         g_gyro.currentPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH();
 
-        // Loop-scope diagnostics so Section 6 can render them unconditionally.
+        // Loop-scope diagnostics consumed by the overlay section below.
         bool  isAiming     = false;
         float stickX       = 0.0f;
         float stickY       = 0.0f;
         bool  isUsingScope = false;
+        // Raw right-stick axes (-32768..32767) read here so the overlay shows them
+        // even while a different camera path is active.
+        int16_t rawStickX = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
+        int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
 
         if (g_gyro.modEnabled)
         {
-            // Pump the SDL input cache exactly once per tick. Non-blocking: returns
-            // false immediately when the queue is empty.
+            // Drain the SDL queue once per tick; only the refreshed internal cache
+            // is used.
             SDL_Event event;
             while (SDL_PollEvent(&event))
             {
-                // Nothing to react to yet - we only need SDL's cached state refreshed.
+                // No event handling yet.
             }
 
-            // Hotplug safety: re-open a gamepad if it was unplugged / not there yet.
+            // Hotplug: re-open the gamepad if it was unplugged or not present yet.
             if (!g_gyro.gamepad || !SDL_GamepadConnected(g_gyro.gamepad))
             {
                 OpenFirstGamepad();
             }
 
-            // F2 toggles lock-on suppression (investigating the floor-drifting issue).
+            // F2 toggles lock-on suppression (floor-drift investigation).
             if (GetAsyncKeyState(VK_F2) & 1)
             {
                 g_gyro.lockonDisabled = !g_gyro.lockonDisabled;
             }
 
-            // Suppress lock-on mechanics while disabled (engine handles it naturally otherwise).
+            // Suppress lock-on while disabled.
             if (g_gyro.lockonDisabled)
             {
                 PLAYER::SET_PLAYER_LOCKON(PLAYER::PLAYER_ID(), FALSE);
@@ -342,61 +321,47 @@ void ScriptMain()
                 }
             }
 
-            // --- 5. Rotate the gameplay camera directly with smoothed gyro --------
-            // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming) -
-            // never during NPC interactions or melee.
+            // --- 5. Rotate the gameplay camera with the smoothed gyro ------------
+            // Gyro only acts during weapon combat aiming (see IsPlayerCombatAiming).
             isAiming = IsPlayerCombatAiming(PLAYER::PLAYER_PED_ID());
 
-            // Precise Alloc8or sniper scope detection via the official
-            // _IS_PLAYER_IN_SCOPE native (0x04D7F33640662FA2): returns TRUE only
-            // while actively looking through a rifle scope. Gates which camera
-            // control path is used below (virtual accumulator vs direct math).
+            // Scope detection: official _IS_PLAYER_IN_SCOPE (0x04D7F33640662FA2)
+            // plus binoculars; selects the camera path used below.
             Hash weaponHash = 0;
             WEAPON::GET_CURRENT_PED_WEAPON(PLAYER::PLAYER_PED_ID(), &weaponHash, true, 0, true);
             bool isSniperScope = invoke<BOOL>(0x04D7F33640662FA2, PLAYER::PLAYER_ID()) != 0;
             isUsingScope = isSniperScope || (weaponHash == MISC::GET_HASH_KEY("WEAPON_BINOCULARS"));
 
-            // Normalized right-stick deflection (-1.0f..1.0f) read straight off the SDL3
-            // gamepad hardware; refreshed from SDL inside the aiming block below.
+            // Normalized stick deflection (-1.0f..1.0f), filled in below.
             stickX = 0.0f;
             stickY = 0.0f;
 
             if (isAiming && g_gyro.readSuccess)
             {
-                // Raw right-stick axes from SDL3, normalized to the -1.0f..1.0f range.
-                int16_t rawStickX = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
-                int16_t rawStickY = SDL_GetGamepadAxis(g_gyro.gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
                 stickX = rawStickX / 32767.0f;
                 stickY = rawStickY / 32767.0f;
 
-                // Split deadzone cut-offs per axis: ignore small stick deflections so a
-                // worn stick resting near center can't cause slow diagonal crawling.
+                // Stick deadzones: ignore small center deflections.
                 if (std::fabs(stickX) < g_gyro.stickDeadzoneX) stickX = 0.0f;
                 if (std::fabs(stickY) < g_gyro.stickDeadzoneY) stickY = 0.0f;
 
-                // Split gyro deadzone cut-offs per axis: zero out slow Pitch/Yaw drift
-                // below the matching threshold before it reaches the camera.
+                // Gyro deadzones on the smoothed values (per axis).
                 if (std::fabs(g_gyro.smoothedGyro[1]) < g_gyro.gyroDeadzoneX) g_gyro.smoothedGyro[1] = 0.0f; // Yaw -> X axis.
                 if (std::fabs(g_gyro.smoothedGyro[0]) < g_gyro.gyroDeadzoneY) g_gyro.smoothedGyro[0] = 0.0f; // Pitch -> Y axis.
 
-                // Dynamic sensitivity multiplier: while looking through a zoom
-                // scope, scale BOTH the gyro and thumbstick deltas so the zoomed
-                // camera stays precise instead of overshooting.
+                // Scoped: scale both deltas down for fine aiming.
                 float currentMultiplier = isUsingScope ? g_gyro.zoomMultiplier : 1.0f;
 
-                // Capture the exact intermediate values of the camera formula into
-                // GyroState so the overlay can diagnose the drift term by term.
-                // currentHeading/currentPitch are refreshed unconditionally every tick.
+                // Formula terms captured for the overlay.
                 g_gyro.currentMultiplierVal = currentMultiplier;
                 g_gyro.gyroContribution     = g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f * currentMultiplier;
                 g_gyro.stickContribution    = stickX * g_gyro.stickSensitivityX * 0.01f * currentMultiplier;
 
                 if (isUsingScope)
                 {
-                    // --- Sniper scope / binoculars: virtual angle accumulator ---
-                    // On the very first frame take a snapshot of the game camera into
-                    // the accumulator, then integrate ONLY our deltas so the engine's
-                    // native sway cannot create a feedback loop.
+                    // --- Scope / binoculars: virtual angle accumulator ---------------
+                    // Snapshot the game camera once, then integrate our deltas only
+                    // (breaks the native sway feedback loop).
                     if (!g_gyro.wasAimingTransition)
                     {
                         g_gyro.virtualHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
@@ -404,11 +369,8 @@ void ScriptMain()
                         g_gyro.wasAimingTransition = true;
                     }
 
-                    // --- PROPOSAL 1: Delta-Correction Synchronization ---
-                    // Read the engine's live heading and, if our accumulator drifted
-                    // more than 2.0 degrees from it (e.g. the game rotated Arthur's
-                    // whole body), resync to the game's actual base alignment so the
-                    // camera cannot lag behind during the forced body shuffle.
+                    // Resync when the engine rotated the body (delta > 2 deg) so the
+                    // camera cannot lag behind the forced alignment.
                     float liveHeading  = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING();
                     float headingDelta = std::fabs(g_gyro.virtualHeading - liveHeading);
                     if (headingDelta > 2.0f)
@@ -416,61 +378,55 @@ void ScriptMain()
                         g_gyro.virtualHeading = liveHeading;
                     }
 
+                    // Mix formula: gyro delta minus (inverted) stick delta.
                     g_gyro.virtualHeading += g_gyro.gyroContribution - g_gyro.stickContribution;
                     g_gyro.virtualPitch   += (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f * currentMultiplier) - (stickY * g_gyro.stickSensitivityY * 0.01f * currentMultiplier);
 
-                    // --- STEP 1: Angle wrap-around logic (Safe to keep) ---
+                    // Wrap heading into -180..180.
                     while (g_gyro.virtualHeading > 180.0f)  g_gyro.virtualHeading -= 360.0f;
                     while (g_gyro.virtualHeading < -180.0f) g_gyro.virtualHeading += 360.0f;
 
-                    // Hard clamp on the virtual pitch so the camera cannot flip over.
+                    // Clamp pitch so the camera cannot flip over.
                     if (g_gyro.virtualPitch > 75.0f) g_gyro.virtualPitch = 75.0f;
                     else if (g_gyro.virtualPitch < -75.0f) g_gyro.virtualPitch = -75.0f;
 
-                    // Yellow "FINAL" telemetry lines show the integrated coordinates.
                     g_gyro.finalHeading = g_gyro.virtualHeading;
                     g_gyro.finalPitch   = g_gyro.virtualPitch;
 
-                    // Feed the pure integrated coordinates back to the engine.
-                    CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(g_gyro.virtualHeading, 0.1f);
-                    CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(g_gyro.virtualPitch, 0.1f);
+                    // Feed the integrated coordinates back; blend 1.0f applies them
+                    // without the easing lag that reads as harsh camera motion.
+                    CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(g_gyro.virtualHeading, 1.0f);
+                    CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(g_gyro.virtualPitch, 1.0f);
                 }
                 else
                 {
-                    // --- Standard 3rd-person over-the-shoulder aiming: direct math ---
-                    // Bypass the virtual accumulator entirely and modify the engine's
-                    // relative camera directly, frame by frame. currentMultiplier is
-                    // 1.0f here (no scope), so it is omitted from every term.
+                    // --- 3rd-person aiming: direct relative math, no accumulator -------
+                    // currentMultiplier is 1.0f here (no scope), so it is omitted.
                     float newHeading = CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() + (g_gyro.smoothedGyro[1] * g_gyro.gyroSensitivityX * 0.01f) - (stickX * g_gyro.stickSensitivityX * 0.01f); // Yaw -> left/right
                     float newPitch   = CAM::GET_GAMEPLAY_CAM_RELATIVE_PITCH()  + (g_gyro.smoothedGyro[0] * g_gyro.gyroSensitivityY * 0.01f) - (stickY * g_gyro.stickSensitivityY * 0.01f); // Pitch inverted -> tilt up looks up
 
-                    // Yellow "FINAL" telemetry lines show the active direct values.
                     g_gyro.finalHeading = newHeading;
                     g_gyro.finalPitch   = newPitch;
 
                     CAM::SET_GAMEPLAY_CAM_RELATIVE_HEADING(newHeading, 0.1f);
                     CAM::SET_GAMEPLAY_CAM_RELATIVE_PITCH(newPitch, 0.1f);
 
-                    // Force the transition flag down so that entering a sniper scope
-                    // later triggers a fresh snapshot on its first frame.
+                    // Reset so entering a scope later takes a fresh snapshot.
                     g_gyro.wasAimingTransition = false;
                 }
             }
         }
         else
         {
-            // Mod disabled: contributions and finals are not computed; report the
-            // default 0.0f baseline so the overlay never shows stale values.
-            // currentHeading/currentPitch are still refreshed unconditionally above.
+            // Mod OFF: report the 0.0f baseline instead of stale telemetry.
+            // currentHeading/currentPitch are still refreshed above.
             g_gyro.gyroContribution  = 0.0f;
             g_gyro.stickContribution = 0.0f;
             g_gyro.finalHeading      = 0.0f;
             g_gyro.finalPitch        = 0.0f;
         }
 
-        // --- 6. On-screen debug overlay ------------------------------------------
-        // Rendered every frame - even while the mod is OFF - so the raw gameplay
-        // camera and the native sniper sway can be analyzed without interference.
+        // --- 6. Debug overlay (rendered with the mod OFF as well) -----------------
         if (g_gyro.showOverlay)
         {
             DrawText(
@@ -486,9 +442,9 @@ void ScriptMain()
                 " | Aiming: " + std::to_string(isAiming ? 1 : 0),
                 0.05f, 0.07f, 255, 255, 255);
 
-            // Green gyro line: live text sliders for Pitch (X) and Yaw (Y). The bar
-            // scale is tied to the deadzone so the central no-movement region stays
-            // clearly visible while the indicator tracks real-time deflection.
+            // Green line: live gyro values (Pitch = X, Yaw = Y).
+            // slider() draws a bar scaled to the gyro deadzone and is kept for axis
+            // diagnostics.
             const float dzG = (g_gyro.gyroDeadzoneX > 0.0f ? g_gyro.gyroDeadzoneX : 0.015f) * 10.0f;
             const float sliderScale = 1.0f / dzG;
             auto slider = [](float value, float scale) -> std::string
@@ -502,21 +458,22 @@ void ScriptMain()
                 bar[pos] = '|';
                 return "[" + bar + "]";
             };
+            // DrawText(
+            //     std::string("Pitch: ") + slider(g_gyro.smoothedGyro[0], sliderScale) +
+            //     "  Yaw: " + slider(g_gyro.smoothedGyro[1], sliderScale),
+            //     0.05f, 0.09f, 0, 255, 0);
             DrawText(
-                std::string("Pitch: ") + slider(g_gyro.smoothedGyro[0], sliderScale) +
-                "  Yaw: " + slider(g_gyro.smoothedGyro[1], sliderScale),
+                std::string("Pitch: ") + (g_gyro.smoothedGyro[0] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[0]) +
+                             "  Yaw: " + (g_gyro.smoothedGyro[1] >= 0.0f ? "+" : "") + std::to_string(g_gyro.smoothedGyro[1]),
                 0.05f, 0.09f, 0, 255, 0);
 
-            // Orange line: raw SDL3 right-stick diagnostics (normalized -1.0f..1.0f).
+            // Orange line: raw right-stick values (-32768..32767).
             DrawText(
-                std::string("Stick X: ") + (stickX >= 0.0f ? "+" : "") + std::to_string(stickX) +
-                " | Y: " + (stickY >= 0.0f ? "+" : "") + std::to_string(stickY),
+                std::string("rawStickX: ") + (rawStickX >= 0.0f ? "+" : "") + std::to_string(rawStickX) +
+                " | Y: " + (rawStickY >= 0.0f ? "+" : "") + std::to_string(rawStickY),
                 0.05f, 0.11f, 255, 165, 0);
 
             // --- Camera formula breakdown (Yaw / Pitch) ---
-            // Every frame the intermediate values of the camera formula are captured
-            // into GyroState (currentHeading/currentPitch even while the mod is OFF)
-            // and printed here so the drift / sniper sway can be diagnosed term by term.
             DrawText("--- Camera Formula Breakdown (Yaw / Pitch) ---", 0.05f, 0.13f, 255, 255, 255);
             DrawText(
                 std::string("CAM::GET_GAMEPLAY_CAM_RELATIVE_HEADING() = ") + (g_gyro.currentHeading >= 0.0f ? "+" : "") + std::to_string(g_gyro.currentHeading),
@@ -537,8 +494,7 @@ void ScriptMain()
                 std::string("FINAL newPitch   = ") + (g_gyro.finalPitch >= 0.0f ? "+" : "") + std::to_string(g_gyro.finalPitch),
                 0.05f, 0.225f, 255, 255, 0);
 
-            // SDL / gamepad errors pushed below the formula breakdown block to
-            // keep the layout scannable.
+            // SDL / gamepad errors below the numeric block to keep the layout scannable.
             if (!g_gyro.sdlError.empty())
             {
                 DrawText("SDL Error: " + g_gyro.sdlError, 0.05f, 0.25f, 255, 0, 0);
@@ -558,8 +514,7 @@ void ScriptMain()
                 DrawText("RDR2 GyroSense: OFF", 0.5f, 0.2f, 255, 0, 0);
         }
 
-        // Not aiming anymore: clear the transition flag so the next aim begins
-        // with a fresh snapshot of the game camera into the virtual accumulator.
+        // Not aiming: next aim starts with a fresh accumulator snapshot.
         if (!isAiming)
         {
             g_gyro.wasAimingTransition = false;
@@ -568,7 +523,7 @@ void ScriptMain()
         scriptWait(0);
     }
 
-    // --- 7. Cleanup (reached only when the script is terminated) -----------------
+    // --- 7. Cleanup (script termination) -----------------------------------------
     if (g_gyro.gamepad)
     {
         SDL_CloseGamepad(g_gyro.gamepad);

@@ -36,8 +36,3 @@ The following tasks are documented for anyone who wants to fork the project and 
 - **Task #10: WinAPI Raw HID Exclusive Hook** — Attempt to exclusively grab the DualSense controller mesh via WinAPI `CreateFileA` on boot to bypass Steam Input automatically, eliminating the need to manually toggle it during launch.
 - **Task #12: Live Debug Telemetry Hotkey** — Add an in-game hotkey (e.g., **F4**) to toggle the real-time visual sliders and graph lines on/off without editing the INI file.
 - **Task #13: Refactor & Comment Stripping** — Strip massive explanatory lecture comments inside `script.cpp` down to tight engineering notes.
-
-## 🤝 Credits
-- **Alexander Blade** — for ScriptHookRDR2 SDK.
-- **Shtivi** — for the Adaptive Triggers Mod codebase reference.
-- **Paliverse** — for the foundational DualSenseX hardware reverse-engineering insights.
